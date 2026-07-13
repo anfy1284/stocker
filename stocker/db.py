@@ -1,21 +1,62 @@
-"""Доступ к SQLite-БД и её инициализация.
+"""Доступ к SQLite-БД, схема и её пошаговые миграции.
 
-На Шаге 1 БД создаётся пустой (без таблиц) — схема ``assets`` появится на
-Шаге 2. Версия схемы хранится в ``PRAGMA user_version``: это задел под
-пошаговые миграции, чтобы последующие модули добавляли таблицы предсказуемо.
+Версия схемы хранится в ``PRAGMA user_version``. ``_MIGRATIONS`` — список
+функций «поднять схему на одну версию»; ``init_db`` применяет недостающие по
+порядку. Каждый шаг проекта, добавляющий таблицы/поля, дописывает сюда свою
+миграцию — так схема растёт предсказуемо и обновляется на месте.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Текущая версия схемы. На Шаге 1 таблиц ещё нет → 0.
-# Каждый шаг, добавляющий таблицы/поля, поднимает это число и свою миграцию.
-SCHEMA_VERSION = 0
+# --- Значения статуса в конвейере (колонка assets.status) ------------------
+STATUS_NEW = "new"  # принят, ещё не классифицирован (Шаг 3 двинет дальше)
+
+
+# --- Миграции --------------------------------------------------------------
+def _migrate_v1_assets(conn: sqlite3.Connection) -> None:
+    """v1 (Шаг 2, приём): таблица снимков ``assets``.
+
+    Заведены только поля этапа приёма и статус. Поля последующих модулей
+    (классификация, группировка, метаданные, загрузка) добавляют свои шаги
+    отдельными миграциями.
+    """
+    conn.execute(
+        """
+        CREATE TABLE assets (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_path TEXT    NOT NULL,
+            preview_path  TEXT,
+            content_hash  TEXT    NOT NULL UNIQUE,
+            file_type     TEXT    NOT NULL,
+            file_size     INTEGER,
+            width         INTEGER,
+            height        INTEGER,
+            captured_at   TEXT,
+            camera_make   TEXT,
+            camera_model  TEXT,
+            orientation   INTEGER,
+            status        TEXT    NOT NULL DEFAULT 'new',
+            created_at    TEXT    NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX idx_assets_status ON assets(status)")
+
+
+# Порядковый список миграций; индекс+1 = целевая версия схемы.
+_MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
+    _migrate_v1_assets,
+]
+
+# Текущая версия схемы = число применённых миграций.
+SCHEMA_VERSION = len(_MIGRATIONS)
 
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
@@ -27,7 +68,7 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
 
 
 def init_db(db_path: Path) -> bool:
-    """Создаёт файл БД при первом запуске и фиксирует версию схемы.
+    """Создаёт файл БД при первом запуске и применяет недостающие миграции.
 
     Возвращает ``True``, если файл был создан этим вызовом, иначе ``False``.
     """
@@ -37,15 +78,16 @@ def init_db(db_path: Path) -> bool:
     conn = get_connection(db_path)
     try:
         current = conn.execute("PRAGMA user_version").fetchone()[0]
-        if current < SCHEMA_VERSION:
-            # Место для будущих миграций (Шаг 2+).
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        for version in range(current, SCHEMA_VERSION):
+            _MIGRATIONS[version](conn)
+            conn.execute(f"PRAGMA user_version = {version + 1}")
             conn.commit()
+            log.info("Применена миграция схемы v%d", version + 1)
     finally:
         conn.close()
 
     if created:
         log.info("Создан файл БД: %s (версия схемы %d)", db_path, SCHEMA_VERSION)
     else:
-        log.info("БД уже существует: %s (версия схемы %d)", db_path, SCHEMA_VERSION)
+        log.info("БД готова: %s (версия схемы %d)", db_path, SCHEMA_VERSION)
     return created

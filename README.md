@@ -22,11 +22,16 @@ copy .env.example .env   # затем впишите ANTHROPIC_API_KEY
 ```powershell
 python -m stocker          # init: создаёт каталоги data/ и пустую БД
 python -m stocker config   # показать текущую конфигурацию
+python -m stocker intake   # принять новые JPEG из data/inbox в БД
 ```
 
 После `init` появляются `data/inbox`, `data/previews`, `data/logs` и файл
 `data/stocker.db`. Пути и ключ настраиваются через `.env` (см. `.env.example`).
 
+Скиньте JPEG в `data/inbox` и запустите `intake`: файлы регистрируются в БД
+(с EXIF и превью 1600px), точные дубли не заводятся повторно.
+
 ## Статус
 
-Реализован **Шаг 1** — каркас и конфигурация. Дальше: приём JPEG (Шаг 2).
+Реализованы **Шаги 1–2** — каркас, конфигурация и приём JPEG. Дальше:
+классификатор «сток/не-сток» (Шаг 3).

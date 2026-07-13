@@ -13,6 +13,7 @@ import sys
 
 from .config import Config, load_config
 from .db import init_db
+from .intake import run_intake
 from .logging_setup import setup_logging
 
 log = logging.getLogger("stocker")
@@ -43,6 +44,13 @@ def cmd_config(cfg: Config) -> int:
     return 0
 
 
+def cmd_intake(cfg: Config) -> int:
+    cfg.ensure_dirs()
+    init_db(cfg.db_path)
+    run_intake(cfg)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stocker",
@@ -51,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("init", help="Создать каталоги и пустую БД (по умолчанию).")
     sub.add_parser("config", help="Показать текущую конфигурацию.")
+    sub.add_parser("intake", help="Принять новые файлы из папки-входящих.")
     return parser
 
 
@@ -64,4 +73,6 @@ def main(argv: list[str] | None = None) -> int:
     command = args.command or "init"
     if command == "config":
         return cmd_config(cfg)
+    if command == "intake":
+        return cmd_intake(cfg)
     return cmd_init(cfg)
