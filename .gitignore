@@ -1,0 +1,19 @@
+# Секреты и локальная конфигурация
+.env
+
+# Рабочие данные (входящие, превью, БД, логи)
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE / ОС
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
