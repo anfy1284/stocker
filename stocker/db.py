@@ -25,6 +25,7 @@ STATUS_APPROVED = "approved"  # одобрено, ждёт генерации м
 STATUS_REJECTED = "rejected"  # забраковано пользователем
 # Кучи трека загрузки на сток:
 STATUS_DESCRIBED = "described"  # метаданные сгенерированы, ждут ревью метаданных
+STATUS_UPLOADED = "uploaded"  # full-res залит на Shutterstock по FTPS, ждёт submit на сайте
 
 
 # --- Миграции --------------------------------------------------------------
@@ -167,6 +168,20 @@ def _migrate_v6_metadata(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
 
 
+def _migrate_v7_upload(conn: sqlite3.Connection) -> None:
+    """v7 (трек загрузки, Шаг B): поля заливки на Shutterstock в ``assets``.
+
+    Заполняются при FTPS-заливке одобренных и описанных снимков. ``upload_name``
+    — имя файла, под которым снимок залит (совпадает с колонкой Filename в CSV,
+    так Shutterstock сопоставляет метаданные с изображением); до заливки — NULL.
+    """
+    for column, coltype in (
+        ("upload_name", "TEXT"),
+        ("uploaded_at", "TEXT"),
+    ):
+        conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
+
+
 # Порядковый список миграций; индекс+1 = целевая версия схемы.
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_assets,
@@ -175,6 +190,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v4_feedback,
     _migrate_v5_api_costs,
     _migrate_v6_metadata,
+    _migrate_v7_upload,
 ]
 
 # Текущая версия схемы = число применённых миграций.

@@ -30,13 +30,21 @@ class Config:
     inbox_dir: Path
     previews_dir: Path
     logs_dir: Path
+    export_dir: Path
     db_path: Path
     anthropic_api_key: str | None
+    shutterstock_user: str | None
+    shutterstock_password: str | None
     log_level: str
 
     @property
     def has_api_key(self) -> bool:
         return bool(self.anthropic_api_key)
+
+    @property
+    def has_ftps_creds(self) -> bool:
+        """Заданы ли логин и пароль для FTPS-заливки на Shutterstock."""
+        return bool(self.shutterstock_user and self.shutterstock_password)
 
     def ensure_dirs(self) -> None:
         """Создаёт все рабочие каталоги (идемпотентно)."""
@@ -45,21 +53,24 @@ class Config:
             self.inbox_dir,
             self.previews_dir,
             self.logs_dir,
+            self.export_dir,
             self.db_path.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
     def as_display_dict(self) -> dict[str, str]:
-        """Безопасное для показа представление (без утечки ключа)."""
+        """Безопасное для показа представление (без утечки секретов)."""
         return {
             "project_root": str(self.project_root),
             "data_dir": str(self.data_dir),
             "inbox_dir": str(self.inbox_dir),
             "previews_dir": str(self.previews_dir),
             "logs_dir": str(self.logs_dir),
+            "export_dir": str(self.export_dir),
             "db_path": str(self.db_path),
             "log_level": self.log_level,
             "anthropic_api_key": "<задан>" if self.has_api_key else "<не задан>",
+            "shutterstock": "<задан>" if self.has_ftps_creds else "<не задан>",
         }
 
 
@@ -80,7 +91,10 @@ def load_config() -> Config:
         inbox_dir=_path_from_env("STOCKER_INBOX_DIR", data_dir / "inbox"),
         previews_dir=_path_from_env("STOCKER_PREVIEWS_DIR", data_dir / "previews"),
         logs_dir=_path_from_env("STOCKER_LOGS_DIR", data_dir / "logs"),
+        export_dir=_path_from_env("STOCKER_EXPORT_DIR", data_dir / "export"),
         db_path=_path_from_env("STOCKER_DB_PATH", data_dir / "stocker.db"),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        shutterstock_user=os.environ.get("STOCKER_SHUTTERSTOCK_USER"),
+        shutterstock_password=os.environ.get("STOCKER_SHUTTERSTOCK_PASSWORD"),
         log_level=os.environ.get("STOCKER_LOG_LEVEL", "INFO").upper(),
     )

@@ -20,6 +20,7 @@ from .improver import improve_prompt
 from .intake import run_intake
 from .logging_setup import setup_logging
 from .metadata import run_metadata
+from .upload import run_upload
 
 log = logging.getLogger("stocker")
 
@@ -96,6 +97,31 @@ def cmd_metadata(cfg: Config) -> int:
     return 0
 
 
+def cmd_upload(cfg: Config, dry_run: bool) -> int:
+    cfg.ensure_dirs()
+    init_db(cfg.db_path)
+    stats = run_upload(cfg, dry_run=dry_run)
+    if stats["total"] == 0:
+        log.info("Нет описанных снимков — выгружать нечего.")
+        return 0
+    if stats["error"]:
+        return 1  # причина уже залогирована в run_upload
+    if stats["sent"]:
+        log.info(
+            "Изображения залиты по FTPS. Теперь применить метаданные: открой "
+            "submit.shutterstock.com → кнопка «CSV» вверху → выбери %s",
+            stats["csv_path"],
+        )
+    elif not dry_run and not cfg.has_ftps_creds:
+        log.error(
+            "Заливка не выполнена: задай STOCKER_SHUTTERSTOCK_USER и "
+            "STOCKER_SHUTTERSTOCK_PASSWORD в .env. CSV готов: %s",
+            stats["csv_path"],
+        )
+        return 1
+    return 0
+
+
 def cmd_web(cfg: Config) -> int:
     from .webapp import run_server
 
@@ -115,6 +141,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("classify", help="Классифицировать новые снимки (сток/не-сток).")
     sub.add_parser("improve-prompt", help="Доработать промпт по накопленным правкам.")
     sub.add_parser("metadata", help="Сгенерировать метаданные для одобренных снимков.")
+    upload = sub.add_parser(
+        "upload", help="Выгрузить описанные снимки на Shutterstock (FTPS + CSV)."
+    )
+    upload.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Только собрать CSV, без соединения и заливки (проверка формата).",
+    )
     sub.add_parser("web", help="Запустить веб-интерфейс ревью (локальный сервер).")
     return parser
 
@@ -137,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_improve_prompt(cfg)
     if command == "metadata":
         return cmd_metadata(cfg)
+    if command == "upload":
+        return cmd_upload(cfg, dry_run=args.dry_run)
     if command == "web":
         return cmd_web(cfg)
     return cmd_init(cfg)
