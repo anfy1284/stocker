@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -180,8 +181,16 @@ def _apply_metadata(conn, asset_id: int, meta: dict[str, object]) -> None:
     )
 
 
-def run_metadata(cfg: Config) -> dict[str, int]:
-    """Генерирует метаданные для всех одобренных снимков. Возвращает статистику."""
+def run_metadata(
+    cfg: Config,
+    on_progress: Callable[[dict[str, int]], None] | None = None,
+) -> dict[str, int]:
+    """Генерирует метаданные для всех одобренных снимков. Возвращает статистику.
+
+    ``on_progress`` (если задан) вызывается с копией статистики сразу после
+    подсчёта общего числа и после каждого снимка — так веб-интерфейс двигает
+    прогресс-бар в реальном времени.
+    """
     if not cfg.has_api_key:
         raise RuntimeError(
             "ANTHROPIC_API_KEY не задан — генерация метаданных невозможна (см. .env)."
@@ -196,6 +205,8 @@ def run_metadata(cfg: Config) -> dict[str, int]:
             "SELECT id, preview_path FROM assets WHERE status = ?", (STATUS_APPROVED,)
         ).fetchall()
         stats["total"] = len(rows)
+        if on_progress:
+            on_progress(dict(stats))
 
         for row in rows:
             try:
@@ -213,6 +224,8 @@ def run_metadata(cfg: Config) -> dict[str, int]:
             except Exception:
                 stats["errors"] += 1
                 log.exception("Ошибка генерации метаданных снимка %d", row["id"])
+            if on_progress:
+                on_progress(dict(stats))
     finally:
         conn.close()
 

@@ -10,16 +10,19 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
 from pathlib import Path
 
 import anthropic
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from . import improver, prompts
+from . import improver, metadata, prompts
 from .config import Config, load_config
 from .db import (
     STATUS_APPROVED,
+    STATUS_DESCRIBED,
     STATUS_NON_STOCK,
     STATUS_REJECTED,
     STATUS_STOCK_CANDIDATE,
@@ -33,6 +36,10 @@ WEB_DIR = Path(__file__).parent / "web"
 # Кучи, доступные в интерфейсе (в порядке показа).
 PILES = (STATUS_STOCK_CANDIDATE, STATUS_NON_STOCK, STATUS_APPROVED, STATUS_REJECTED)
 
+# Статусы «одобренной» кучи: одобрены пользователем на триаже. Внутри —
+# ``described`` (метаданные готовы) и ``approved`` (метаданные ещё не сгенерированы).
+APPROVED_PILE = (STATUS_APPROVED, STATUS_DESCRIBED)
+
 # Размер миниатюры для сетки (полное превью 1600px — только в крупном просмотре).
 THUMB_MAX_SIDE = 320
 
@@ -43,6 +50,33 @@ def create_app(cfg: Config | None = None) -> Flask:
 
     def _conn():
         return get_connection(cfg.db_path)
+
+    # --- Фоновый процесс генерации метаданных ------------------------------
+    # Один процесс на сервер: пользователь жмёт кнопку в шапке, генерация идёт
+    # в отдельном потоке, интерфейс опрашивает статус и рисует прогресс-бар.
+    meta_lock = threading.Lock()
+    meta_state = {
+        "running": False,
+        "total": 0,
+        "done": 0,
+        "errors": 0,
+        "error": None,  # текст фатальной ошибки (нет ключа и т.п.), иначе None
+    }
+
+    def _meta_worker():
+        def on_progress(stats: dict[str, int]) -> None:
+            with meta_lock:
+                meta_state.update(stats)
+
+        try:
+            metadata.run_metadata(cfg, on_progress=on_progress)
+        except Exception as exc:  # noqa: BLE001 — показываем текст пользователю
+            log.exception("Фатальная ошибка генерации метаданных")
+            with meta_lock:
+                meta_state["error"] = str(exc)
+        finally:
+            with meta_lock:
+                meta_state["running"] = False
 
     @app.get("/")
     def index():
@@ -70,16 +104,21 @@ def create_app(cfg: Config | None = None) -> Flask:
                 im.save(dest, "JPEG", quality=80)
         return send_from_directory(thumbs, name)
 
+    def _count(conn, status: str) -> int:
+        return conn.execute(
+            "SELECT count(1) FROM assets WHERE status = ?", (status,)
+        ).fetchone()[0]
+
     @app.get("/api/summary")
     def summary():
         conn = _conn()
         try:
-            counts = {
-                s: conn.execute(
-                    "SELECT count(1) FROM assets WHERE status = ?", (s,)
-                ).fetchone()[0]
-                for s in PILES
-            }
+            counts = {s: _count(conn, s) for s in PILES}
+            described = _count(conn, STATUS_DESCRIBED)
+            # Куча «Одобрено» = одобренные + уже описанные (метаданные готовы).
+            counts[STATUS_APPROVED] += described
+            # Сколько одобренных ещё ждут генерации метаданных (для баннера/кнопки).
+            counts["meta_pending"] = _count(conn, STATUS_APPROVED)
         finally:
             conn.close()
         return jsonify(counts)
@@ -87,12 +126,17 @@ def create_app(cfg: Config | None = None) -> Flask:
     @app.get("/api/assets")
     def assets():
         status = request.args.get("status", STATUS_STOCK_CANDIDATE)
+        # «Одобрено» — сводная куча: одобренные + описанные (метаданные готовы).
+        wanted = APPROVED_PILE if status == STATUS_APPROVED else (status,)
+        placeholders = ",".join("?" * len(wanted))
         conn = _conn()
         try:
             rows = conn.execute(
                 "SELECT id, preview_path, status, category, classification_reason, "
-                "has_logo, has_brand, has_text FROM assets WHERE status = ? ORDER BY id",
-                (status,),
+                "has_logo, has_brand, has_text, meta_description, meta_keywords, "
+                "meta_category1, meta_category2, meta_generated_at "
+                f"FROM assets WHERE status IN ({placeholders}) ORDER BY id",
+                wanted,
             ).fetchall()
             out = []
             for r in rows:
@@ -101,6 +145,15 @@ def create_app(cfg: Config | None = None) -> Flask:
                     "WHERE asset_id = ? AND comment IS NOT NULL ORDER BY id",
                     (r["id"],),
                 ).fetchall()
+                meta = None
+                if r["meta_description"]:
+                    meta = {
+                        "description": r["meta_description"],
+                        "keywords": json.loads(r["meta_keywords"] or "[]"),
+                        "category1": r["meta_category1"],
+                        "category2": r["meta_category2"],
+                        "at": r["meta_generated_at"],
+                    }
                 out.append(
                     {
                         "id": r["id"],
@@ -120,6 +173,7 @@ def create_app(cfg: Config | None = None) -> Flask:
                         "comments": [
                             {"text": f["comment"], "at": f["created_at"]} for f in fb
                         ],
+                        "meta": meta,
                     }
                 )
         finally:
@@ -163,6 +217,22 @@ def create_app(cfg: Config | None = None) -> Flask:
         finally:
             conn.close()
         return jsonify({"ok": True, "status": new_status, "contradiction": contradiction})
+
+    @app.post("/api/metadata/run")
+    def metadata_run():
+        """Запускает фоновую генерацию метаданных для одобренных снимков."""
+        with meta_lock:
+            if meta_state["running"]:
+                return jsonify({"ok": False, "running": True}), 409
+            meta_state.update(running=True, total=0, done=0, errors=0, error=None)
+        threading.Thread(target=_meta_worker, daemon=True).start()
+        return jsonify({"ok": True})
+
+    @app.get("/api/metadata/status")
+    def metadata_status():
+        """Текущее состояние генерации метаданных (для прогресс-бара)."""
+        with meta_lock:
+            return jsonify(dict(meta_state))
 
     @app.get("/api/prompts")
     def prompt_list():

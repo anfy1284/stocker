@@ -11,7 +11,6 @@
   .tab, .btn { font: inherit; padding: 7px 12px; border: 1px solid #ccc; border-radius: 6px;
                background: #fff; cursor: pointer; }
   .tab.active { background: #1c1917; color: #fff; border-color: #1c1917; }
-  #promptsBtn { margin-left: auto; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
           gap: 10px; padding: 12px; }
   .card { background: #fff; border: 1px solid #e7e5e4; border-radius: 8px; overflow: hidden; cursor: pointer; }
@@ -23,7 +22,31 @@
   .badge.no { background: #fee2e2; color: #991b1b; }
   .badge.approved { background: #dbeafe; color: #1e40af; }
   .badge.rejected { background: #f3f4f6; color: #4b5563; }
+  .badge.described { background: #dcfce7; color: #166534; }
+  .badge.nometa { background: #fee2e2; color: #991b1b; }
   #empty { padding: 40px; text-align: center; color: #a8a29e; }
+
+  /* кнопка запуска генерации метаданных + прогресс-бар в шапке */
+  #metaBtn { margin-left: auto; }
+  #metaBtn[disabled] { opacity: .5; cursor: default; }
+  #metaProg { display: none; align-items: center; gap: 8px; margin-left: auto; min-width: 220px; }
+  .progwrap { flex: 1; height: 8px; background: #e7e5e4; border-radius: 5px; overflow: hidden; min-width: 120px; }
+  #metaBar { height: 100%; width: 0; background: #16a34a; transition: width .3s; }
+  #metaProgTxt { font-size: 12px; color: #57534e; white-space: nowrap; }
+
+  /* баннер статуса метаданных в начале раздела «Одобрено» */
+  #bar { display: none; margin: 10px 12px 0; padding: 10px 12px; border-radius: 8px; font-weight: 600; }
+  #bar.ok { background: #dcfce7; color: #166534; }
+  #bar.err { background: #fee2e2; color: #991b1b; }
+  #bar.run { background: #dbeafe; color: #1e40af; }
+  #bar .btn { margin-left: 10px; }
+
+  /* блок метаданных в лайтбоксе */
+  .meta-block { border-top: 1px solid #44403c; margin-top: 10px; padding-top: 10px; }
+  .meta-block .mtitle { font-weight: 700; margin-bottom: 6px; }
+  .meta-block .mtitle.ok { color: #4ade80; }
+  .meta-block .mtitle.err { color: #f87171; }
+  .meta-block .mrow { font-size: 12.5px; color: #d6d3d1; margin-bottom: 6px; line-height: 1.5; }
 
   /* лайтбокс: десктоп — картинка слева, панель справа; мобила — столбиком */
   .lb { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.93); z-index: 100; }
@@ -83,9 +106,15 @@
   <button class="tab" data-s="non_stock">Не-Сток <span>0</span></button>
   <button class="tab" data-s="approved">Одобрено <span>0</span></button>
   <button class="tab" data-s="rejected">Брак <span>0</span></button>
+  <button class="btn" id="metaBtn">⚙ Описать одобренные</button>
+  <div id="metaProg">
+    <span id="metaProgTxt">Описываю…</span>
+    <span class="progwrap"><span id="metaBar"></span></span>
+  </div>
   <button class="btn" id="promptsBtn">Промпты</button>
 </header>
 
+<div id="bar"></div>
 <div class="grid" id="grid"></div>
 <div id="empty" style="display:none">Здесь пусто — необработанных снимков нет.</div>
 
@@ -117,6 +146,15 @@
   </div>
 </div></div>
 
+<div class="modal" id="offerModal"><div class="modal-box">
+  <h3>Сток разобран</h3>
+  <p style="color:#57534e;font-size:14px;margin:0 0 12px">Все кандидаты просмотрены. Запустить генерацию метаданных (описание, ключевые слова, категории) для <b id="offerN">0</b> одобренных фото?</p>
+  <div class="modal-actions">
+    <button class="btn" id="offerLater">Позже</button>
+    <button class="btn" id="offerRun" style="background:#16a34a;color:#fff">Запустить</button>
+  </div>
+</div></div>
+
 <div class="modal" id="promptsModal"><div class="modal-box">
   <h3>История промптов</h3>
   <div id="promptList"></div>
@@ -136,9 +174,13 @@
 <script>
 const $ = s => document.querySelector(s);
 const api = (u, opt) => fetch(u, opt).then(r => r.json());
+const esc = s => (s || '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 let pile = 'stock_candidate';
 let items = [];
 let idx = 0;
+let summary = {};        // последние счётчики из /api/summary
+let metaPoll = null;     // id интервала опроса статуса генерации
+let offeredMeta = false; // предложение «запустить» показываем один раз за сессию
 
 function fmtDate(iso) {
   const d = new Date(iso);
@@ -147,12 +189,15 @@ function fmtDate(iso) {
 }
 function badgeFor(s) {
   return { stock_candidate:['ok','СТОК'], non_stock:['no','НЕ-СТОК'],
-           approved:['approved','ОДОБРЕНО'], rejected:['rejected','БРАК'] }[s];
+           approved:['approved','ОДОБРЕНО'], described:['described','ОПИСАНО'],
+           rejected:['rejected','БРАК'] }[s];
 }
 
 async function refreshCounts() {
-  const c = await api('/api/summary');
-  document.querySelectorAll('.tab').forEach(t => t.querySelector('span').textContent = c[t.dataset.s] ?? 0);
+  summary = await api('/api/summary');
+  document.querySelectorAll('.tab').forEach(t => t.querySelector('span').textContent = summary[t.dataset.s] ?? 0);
+  updateMetaButton();
+  renderBanner();
 }
 let assetsCtrl = null;
 async function loadPile(s) {
@@ -171,16 +216,23 @@ async function loadPile(s) {
   renderGrid();
   refreshCounts();
 }
+function cardCaption(a) {
+  // В «Одобрено» показываем статус метаданных: зелёный «ОПИСАНО» + начало
+  // описания, либо красный «БЕЗ МЕТА» для ещё не описанных.
+  if (a.meta) return `<span class="badge described">ОПИСАНО</span> ${esc(a.meta.description)}`;
+  if (a.status === 'approved') return `<span class="badge nometa">БЕЗ МЕТА</span>`;
+  const [cls, txt] = badgeFor(a.status);
+  return `<span class="badge ${cls}">${txt}</span> ${esc(a.category || '')}`;
+}
 function renderGrid() {
   const g = $('#grid');
   g.innerHTML = '';
   $('#empty').style.display = items.length ? 'none' : 'block';
   items.forEach((a, i) => {
-    const [cls, txt] = badgeFor(a.status);
     const d = document.createElement('div');
     d.className = 'card';
     d.innerHTML = `<img loading="lazy" decoding="async" src="/thumb/${a.preview}">
-      <div class="cap"><span class="badge ${cls}">${txt}</span> ${a.category || ''}</div>`;
+      <div class="cap">${cardCaption(a)}</div>`;
     d.onclick = () => openLb(i);
     g.appendChild(d);
   });
@@ -202,9 +254,21 @@ function renderLb() {
       `<div>комментарий пользователя от ${fmtDate(c.at)}: ${c.text}</div>`).join('') + '</div>';
   }
   const flags = a.flags && a.flags.length ? `<div class="flags">⚠ ${a.flags.join(', ')}</div>` : '';
+  let meta = '';
+  if (a.meta) {
+    meta = `<div class="meta-block">
+      <div class="mtitle ok">✓ Метаданные готовы</div>
+      <div class="mrow"><b>Описание:</b> ${esc(a.meta.description)}</div>
+      <div class="mrow"><b>Категории:</b> ${esc(a.meta.category1)}${a.meta.category2 ? ', ' + esc(a.meta.category2) : ''}</div>
+      <div class="mrow"><b>Ключевые слова (${a.meta.keywords.length}):</b> ${a.meta.keywords.map(esc).join(', ')}</div>
+    </div>`;
+  } else if (a.status === 'approved') {
+    meta = `<div class="meta-block"><div class="mtitle err">✗ Метаданные не сгенерированы</div>
+      <div class="mrow">Нажмите «⚙ Описать одобренные» в шапке, чтобы сгенерировать.</div></div>`;
+  }
   $('#lbInfo').innerHTML =
-    `<span class="badge ${cls}">${txt}</span><span class="cat">${a.category || ''}</span>`
-    + flags + `<div class="reason">${a.reason || ''}</div>` + log;
+    `<span class="badge ${cls}">${txt}</span><span class="cat">${esc(a.category || '')}</span>`
+    + flags + `<div class="reason">${esc(a.reason || '')}</div>` + meta + log;
 }
 function nav(d) { idx = (idx + d + items.length) % items.length; renderLb(); }
 
@@ -226,7 +290,8 @@ async function decide(action) {
     body: JSON.stringify({ action, comment })
   });
   items.splice(idx, 1);   // ушёл из текущей кучи
-  refreshCounts();
+  await refreshCounts();
+  maybeOfferMeta();       // разобрал весь Сток → предложить описать одобренные
   if (!items.length) { closeLb(); renderGrid(); return; }
   renderLb(); renderGrid();
 }
@@ -318,6 +383,77 @@ $('#edSave').onclick = async () => {
 $('#edCancel').onclick = () => $('#editModal').classList.remove('open');
 $('#promptsBtn').onclick = openPrompts;
 $('#pmClose').onclick = () => $('#promptsModal').classList.remove('open');
+
+// --- генерация метаданных: кнопка / прогресс / баннер ---
+function updateMetaButton() {
+  if (metaPoll) return;             // во время генерации кнопкой управляет опрос
+  const pending = summary.meta_pending || 0;
+  const btn = $('#metaBtn');
+  btn.textContent = pending ? `⚙ Описать одобренные (${pending})` : '⚙ Описать одобренные';
+  btn.disabled = pending === 0;
+}
+function renderBanner() {
+  const bar = $('#bar');
+  if (pile !== 'approved') { bar.style.display = 'none'; return; }
+  const total = summary.approved || 0, pending = summary.meta_pending || 0, ready = total - pending;
+  bar.style.display = 'block';
+  if (metaPoll) { bar.className = 'run'; bar.textContent = 'Генерация метаданных идёт…'; return; }
+  if (total === 0) { bar.style.display = 'none'; return; }
+  if (pending === 0) {
+    bar.className = 'ok';
+    bar.textContent = `✓ Метаданные готовы для всех ${ready} фото.`;
+  } else {
+    bar.className = 'err';
+    bar.innerHTML = `✗ Метаданные не сгенерированы для ${pending} фото`
+      + (ready ? ` (готово ${ready})` : '') + '. '
+      + `<button class="btn" id="barRun">Описать одобренные</button>`;
+    $('#barRun').onclick = startMeta;
+  }
+}
+function showProg(st) {
+  $('#metaBtn').style.display = 'none';
+  $('#metaProg').style.display = 'flex';
+  const seen = st.done + st.errors;
+  const pct = st.total ? Math.round(seen / st.total * 100) : 0;
+  $('#metaBar').style.width = pct + '%';
+  $('#metaProgTxt').textContent = st.total
+    ? `Описываю ${seen}/${st.total}` + (st.errors ? ` · ошибок ${st.errors}` : '')
+    : 'Запуск…';
+}
+function pollMeta() {
+  if (metaPoll) return;
+  const tick = async () => {
+    const st = await api('/api/metadata/status');
+    if (st.running) { showProg(st); if (pile === 'approved') renderBanner(); return; }
+    clearInterval(metaPoll); metaPoll = null;
+    $('#metaProg').style.display = 'none';
+    $('#metaBtn').style.display = '';
+    if (st.error) alert('Ошибка генерации метаданных: ' + st.error);
+    await refreshCounts();                     // обновит кнопку и баннер
+    if (pile === 'approved') loadPile('approved'); // подтянуть свежие метаданные
+  };
+  metaPoll = setInterval(tick, 1200);
+  tick();
+}
+async function startMeta() {
+  $('#offerModal').classList.remove('open');
+  await fetch('/api/metadata/run', { method: 'POST' });
+  pollMeta();
+}
+function maybeOfferMeta() {
+  if (offeredMeta || metaPoll) return;
+  if ((summary.stock_candidate || 0) > 0) return;
+  if ((summary.meta_pending || 0) === 0) return;
+  offeredMeta = true;
+  $('#offerN').textContent = summary.meta_pending;
+  $('#offerModal').classList.add('open');
+}
+$('#metaBtn').onclick = startMeta;
+$('#offerRun').onclick = startMeta;
+$('#offerLater').onclick = () => $('#offerModal').classList.remove('open');
+
+// при загрузке: если генерация уже идёт (перезагрузили страницу) — подхватить
+api('/api/metadata/status').then(st => { if (st.running) pollMeta(); });
 
 loadPile('stock_candidate');
 </script>
