@@ -21,8 +21,10 @@ STATUS_NEW = "new"  # принят, ещё не классифицирован
 STATUS_STOCK_CANDIDATE = "stock_candidate"  # ИИ считает стоком
 STATUS_NON_STOCK = "non_stock"  # ИИ отсеял
 # Кучи после ревью пользователя (обработанные):
-STATUS_APPROVED = "approved"  # одобрено, в очередь на отправку
+STATUS_APPROVED = "approved"  # одобрено, ждёт генерации метаданных
 STATUS_REJECTED = "rejected"  # забраковано пользователем
+# Кучи трека загрузки на сток:
+STATUS_DESCRIBED = "described"  # метаданные сгенерированы, ждут ревью метаданных
 
 
 # --- Миграции --------------------------------------------------------------
@@ -148,6 +150,23 @@ def _migrate_v5_api_costs(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX idx_api_costs_created ON api_costs(created_at)")
 
 
+def _migrate_v6_metadata(conn: sqlite3.Connection) -> None:
+    """v6 (трек загрузки, Шаг A): поля метаданных Shutterstock в ``assets``.
+
+    Заполняются генератором метаданных для одобренных снимков; до его прогона —
+    NULL. ``meta_keywords`` хранится как JSON-массив строк; категории — по одному
+    значению из фиксированного списка Shutterstock (вторая опциональна).
+    """
+    for column, coltype in (
+        ("meta_description", "TEXT"),
+        ("meta_keywords", "TEXT"),
+        ("meta_category1", "TEXT"),
+        ("meta_category2", "TEXT"),
+        ("meta_generated_at", "TEXT"),
+    ):
+        conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
+
+
 # Порядковый список миграций; индекс+1 = целевая версия схемы.
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_assets,
@@ -155,6 +174,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v3_prompts,
     _migrate_v4_feedback,
     _migrate_v5_api_costs,
+    _migrate_v6_metadata,
 ]
 
 # Текущая версия схемы = число применённых миграций.

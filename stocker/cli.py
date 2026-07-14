@@ -19,6 +19,7 @@ from .db import get_connection, init_db
 from .improver import improve_prompt
 from .intake import run_intake
 from .logging_setup import setup_logging
+from .metadata import run_metadata
 
 log = logging.getLogger("stocker")
 
@@ -84,6 +85,17 @@ def cmd_improve_prompt(cfg: Config) -> int:
     return 0
 
 
+def cmd_metadata(cfg: Config) -> int:
+    cfg.ensure_dirs()
+    init_db(cfg.db_path)
+    try:
+        run_metadata(cfg)
+    except RuntimeError as exc:
+        log.error("%s", exc)
+        return 1
+    return 0
+
+
 def cmd_web(cfg: Config) -> int:
     from .webapp import run_server
 
@@ -102,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("intake", help="Принять новые файлы из папки-входящих.")
     sub.add_parser("classify", help="Классифицировать новые снимки (сток/не-сток).")
     sub.add_parser("improve-prompt", help="Доработать промпт по накопленным правкам.")
+    sub.add_parser("metadata", help="Сгенерировать метаданные для одобренных снимков.")
     sub.add_parser("web", help="Запустить веб-интерфейс ревью (локальный сервер).")
     return parser
 
@@ -122,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_classify(cfg)
     if command == "improve-prompt":
         return cmd_improve_prompt(cfg)
+    if command == "metadata":
+        return cmd_metadata(cfg)
     if command == "web":
         return cmd_web(cfg)
     return cmd_init(cfg)
