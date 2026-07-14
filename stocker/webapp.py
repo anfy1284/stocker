@@ -18,7 +18,7 @@ from pathlib import Path
 import anthropic
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from . import improver, metadata, prompts
+from . import improver, metadata, prompts, upload
 from .config import Config, load_config
 from .db import (
     STATUS_APPROVED,
@@ -26,6 +26,7 @@ from .db import (
     STATUS_NON_STOCK,
     STATUS_REJECTED,
     STATUS_STOCK_CANDIDATE,
+    STATUS_UPLOADED,
     get_connection,
     init_db,
 )
@@ -34,7 +35,13 @@ log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent / "web"
 
 # Кучи, доступные в интерфейсе (в порядке показа).
-PILES = (STATUS_STOCK_CANDIDATE, STATUS_NON_STOCK, STATUS_APPROVED, STATUS_REJECTED)
+PILES = (
+    STATUS_STOCK_CANDIDATE,
+    STATUS_NON_STOCK,
+    STATUS_APPROVED,
+    STATUS_UPLOADED,
+    STATUS_REJECTED,
+)
 
 # Статусы «одобренной» кучи: одобрены пользователем на триаже. Внутри —
 # ``described`` (метаданные готовы) и ``approved`` (метаданные ещё не сгенерированы).
@@ -77,6 +84,40 @@ def create_app(cfg: Config | None = None) -> Flask:
         finally:
             with meta_lock:
                 meta_state["running"] = False
+
+    # --- Фоновая выгрузка на Shutterstock (аналогично метаданным) ----------
+    up_lock = threading.Lock()
+    up_state = {
+        "running": False,
+        "total": 0,
+        "uploaded": 0,
+        "errors": 0,
+        "error": None,   # фатальная ошибка (нет доступов, обрыв соединения)
+        "csv_path": None,
+    }
+
+    def _upload_worker():
+        def on_progress(stats: dict) -> None:
+            with up_lock:
+                up_state.update(
+                    total=stats["total"],
+                    uploaded=stats["uploaded"],
+                    errors=stats["errors"],
+                )
+
+        try:
+            stats = upload.run_upload(cfg, on_progress=on_progress)
+            with up_lock:
+                up_state["csv_path"] = stats["csv_path"]
+                if stats.get("error"):
+                    up_state["error"] = stats["error"]
+        except Exception as exc:  # noqa: BLE001 — показываем текст пользователю
+            log.exception("Фатальная ошибка выгрузки на Shutterstock")
+            with up_lock:
+                up_state["error"] = str(exc)
+        finally:
+            with up_lock:
+                up_state["running"] = False
 
     @app.get("/")
     def index():
@@ -134,7 +175,8 @@ def create_app(cfg: Config | None = None) -> Flask:
             rows = conn.execute(
                 "SELECT id, preview_path, status, category, classification_reason, "
                 "has_logo, has_brand, has_text, meta_description, meta_keywords, "
-                "meta_category1, meta_category2, meta_generated_at "
+                "meta_category1, meta_category2, meta_generated_at, "
+                "upload_name, uploaded_at "
                 f"FROM assets WHERE status IN ({placeholders}) ORDER BY id",
                 wanted,
             ).fetchall()
@@ -174,6 +216,11 @@ def create_app(cfg: Config | None = None) -> Flask:
                             {"text": f["comment"], "at": f["created_at"]} for f in fb
                         ],
                         "meta": meta,
+                        "upload": (
+                            {"name": r["upload_name"], "at": r["uploaded_at"]}
+                            if r["upload_name"]
+                            else None
+                        ),
                     }
                 )
         finally:
@@ -233,6 +280,29 @@ def create_app(cfg: Config | None = None) -> Flask:
         """Текущее состояние генерации метаданных (для прогресс-бара)."""
         with meta_lock:
             return jsonify(dict(meta_state))
+
+    @app.post("/api/upload/run")
+    def upload_run():
+        """Запускает фоновую выгрузку описанных снимков на Shutterstock."""
+        if not cfg.has_ftps_creds:
+            # Без доступов льём впустую — сразу честно говорим интерфейсу.
+            return jsonify({"ok": False, "error": "no_creds"}), 400
+        with up_lock:
+            if up_state["running"]:
+                return jsonify({"ok": False, "running": True}), 409
+            up_state.update(
+                running=True, total=0, uploaded=0, errors=0, error=None, csv_path=None
+            )
+        threading.Thread(target=_upload_worker, daemon=True).start()
+        return jsonify({"ok": True})
+
+    @app.get("/api/upload/status")
+    def upload_status():
+        """Текущее состояние выгрузки (для прогресс-бара)."""
+        with up_lock:
+            state = dict(up_state)
+        state["has_creds"] = cfg.has_ftps_creds
+        return jsonify(state)
 
     @app.get("/api/prompts")
     def prompt_list():

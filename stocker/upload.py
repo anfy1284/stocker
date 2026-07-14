@@ -20,6 +20,7 @@ import csv
 import json
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime
 from ftplib import FTP_TLS
 from pathlib import Path
@@ -141,12 +142,18 @@ def _ftps_connect(cfg: Config) -> FTP_TLS:
     return ftp
 
 
-def run_upload(cfg: Config, dry_run: bool = False) -> dict:
+def run_upload(
+    cfg: Config,
+    dry_run: bool = False,
+    on_progress: Callable[[dict], None] | None = None,
+) -> dict:
     """Выгружает описанные снимки на Shutterstock. Возвращает статистику.
 
     ``dry_run`` — только собрать CSV, без соединения и смены статусов (для
     проверки формата). Без заданных FTPS-доступов CSV тоже пишется, но заливки
     не происходит — пользователь сначала задаёт доступы в ``.env``.
+    ``on_progress`` (если задан) вызывается с копией статистики перед заливкой
+    и после каждого снимка — веб-интерфейс двигает прогресс-бар.
     """
     cfg.ensure_dirs()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -196,6 +203,8 @@ def run_upload(cfg: Config, dry_run: bool = False) -> dict:
             stats["error"] = str(exc)
             return stats
         uploaded: list[dict] = []
+        if on_progress:
+            on_progress(dict(stats))
         try:
             now = datetime.now().isoformat()
             for r in records:
@@ -220,6 +229,8 @@ def run_upload(cfg: Config, dry_run: bool = False) -> dict:
                 except Exception:
                     stats["errors"] += 1
                     log.exception("Ошибка заливки снимка %d", r["id"])
+                if on_progress:
+                    on_progress(dict(stats))
         finally:
             try:
                 ftp.quit()

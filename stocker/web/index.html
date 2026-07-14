@@ -24,7 +24,12 @@
   .badge.rejected { background: #f3f4f6; color: #4b5563; }
   .badge.described { background: #dcfce7; color: #166534; }
   .badge.nometa { background: #fee2e2; color: #991b1b; }
+  .badge.uploaded { background: #ede9fe; color: #6d28d9; }
   #empty { padding: 40px; text-align: center; color: #a8a29e; }
+  #bar .btn.up { background: #6d28d9; color: #fff; border-color: #6d28d9; }
+  .barbar { display: inline-block; width: 160px; height: 8px; background: #bfdbfe;
+            border-radius: 5px; overflow: hidden; vertical-align: middle; margin-left: 10px; }
+  .barbar > span { display: block; height: 100%; background: #2563eb; transition: width .3s; }
 
   /* кнопка запуска генерации метаданных + прогресс-бар в шапке */
   #metaBtn { margin-left: auto; }
@@ -105,6 +110,7 @@
   <button class="tab active" data-s="stock_candidate">Сток <span>0</span></button>
   <button class="tab" data-s="non_stock">Не-Сток <span>0</span></button>
   <button class="tab" data-s="approved">Одобрено <span>0</span></button>
+  <button class="tab" data-s="uploaded">Выгружено <span>0</span></button>
   <button class="tab" data-s="rejected">Брак <span>0</span></button>
   <button class="btn" id="metaBtn">⚙ Описать одобренные</button>
   <div id="metaProg">
@@ -146,6 +152,17 @@
   </div>
 </div></div>
 
+<div class="modal" id="uploadDoneModal"><div class="modal-box">
+  <h3>Изображения выгружены</h3>
+  <p style="color:#57534e;font-size:14px;margin:0 0 8px">Залито на Shutterstock: <b id="udN">0</b> фото. Осталось применить метаданные на сайте (Shutterstock не принимает CSV по FTPS):</p>
+  <ol style="color:#1c1917;font-size:14px;line-height:1.6;margin:0 0 4px;padding-left:20px">
+    <li>Открой <b>submit.shutterstock.com</b> → кнопка «CSV» вверху.</li>
+    <li>Выбери файл:<br><code id="udCsv" style="font-size:12px;word-break:break-all;background:#fafaf9;padding:2px 4px;border-radius:4px"></code></li>
+    <li>Проверь и нажми Submit.</li>
+  </ol>
+  <div class="modal-actions"><button class="btn" id="udClose" style="background:#1c1917;color:#fff">Понятно</button></div>
+</div></div>
+
 <div class="modal" id="offerModal"><div class="modal-box">
   <h3>Сток разобран</h3>
   <p style="color:#57534e;font-size:14px;margin:0 0 12px">Все кандидаты просмотрены. Запустить генерацию метаданных (описание, ключевые слова, категории) для <b id="offerN">0</b> одобренных фото?</p>
@@ -181,6 +198,8 @@ let idx = 0;
 let summary = {};        // последние счётчики из /api/summary
 let metaPoll = null;     // id интервала опроса статуса генерации
 let offeredMeta = false; // предложение «запустить» показываем один раз за сессию
+let upPoll = null;       // id интервала опроса статуса выгрузки
+let upStatus = null;     // последний ответ /api/upload/status (для прогресса)
 
 function fmtDate(iso) {
   const d = new Date(iso);
@@ -190,7 +209,7 @@ function fmtDate(iso) {
 function badgeFor(s) {
   return { stock_candidate:['ok','СТОК'], non_stock:['no','НЕ-СТОК'],
            approved:['approved','ОДОБРЕНО'], described:['described','ОПИСАНО'],
-           rejected:['rejected','БРАК'] }[s];
+           uploaded:['uploaded','ВЫГРУЖЕНО'], rejected:['rejected','БРАК'] }[s];
 }
 
 async function refreshCounts() {
@@ -217,8 +236,9 @@ async function loadPile(s) {
   refreshCounts();
 }
 function cardCaption(a) {
-  // В «Одобрено» показываем статус метаданных: зелёный «ОПИСАНО» + начало
-  // описания, либо красный «БЕЗ МЕТА» для ещё не описанных.
+  // В «Одобрено»/«Выгружено» показываем статус: фиолетовый «ВЫГРУЖЕНО»,
+  // зелёный «ОПИСАНО» + начало описания, либо красный «БЕЗ МЕТА».
+  if (a.status === 'uploaded') return `<span class="badge uploaded">ВЫГРУЖЕНО</span> ${esc(a.meta ? a.meta.description : '')}`;
   if (a.meta) return `<span class="badge described">ОПИСАНО</span> ${esc(a.meta.description)}`;
   if (a.status === 'approved') return `<span class="badge nometa">БЕЗ МЕТА</span>`;
   const [cls, txt] = badgeFor(a.status);
@@ -239,6 +259,28 @@ function renderGrid() {
 }
 
 // --- лайтбокс ---
+function metaRows(m) {
+  return `<div class="mrow"><b>Описание:</b> ${esc(m.description)}</div>
+    <div class="mrow"><b>Категории:</b> ${esc(m.category1)}${m.category2 ? ', ' + esc(m.category2) : ''}</div>
+    <div class="mrow"><b>Ключевые слова (${m.keywords.length}):</b> ${m.keywords.map(esc).join(', ')}</div>`;
+}
+function metaBlock(a) {
+  if (a.upload) {
+    return `<div class="meta-block"><div class="mtitle ok">✓ Выгружено на Shutterstock</div>
+      <div class="mrow"><b>Файл:</b> ${esc(a.upload.name)}</div>
+      <div class="mrow"><b>Когда:</b> ${a.upload.at ? fmtDate(a.upload.at) : ''}</div>`
+      + (a.meta ? metaRows(a.meta) : '') + `</div>`;
+  }
+  if (a.meta) {
+    return `<div class="meta-block"><div class="mtitle ok">✓ Метаданные готовы</div>`
+      + metaRows(a.meta) + `</div>`;
+  }
+  if (a.status === 'approved') {
+    return `<div class="meta-block"><div class="mtitle err">✗ Метаданные не сгенерированы</div>
+      <div class="mrow">Нажмите «⚙ Описать одобренные» в шапке, чтобы сгенерировать.</div></div>`;
+  }
+  return '';
+}
 function openLb(i) { idx = i; renderLb(); $('#lb').classList.add('open'); }
 function closeLb() { $('#lb').classList.remove('open'); }
 function renderLb() {
@@ -254,21 +296,9 @@ function renderLb() {
       `<div>комментарий пользователя от ${fmtDate(c.at)}: ${c.text}</div>`).join('') + '</div>';
   }
   const flags = a.flags && a.flags.length ? `<div class="flags">⚠ ${a.flags.join(', ')}</div>` : '';
-  let meta = '';
-  if (a.meta) {
-    meta = `<div class="meta-block">
-      <div class="mtitle ok">✓ Метаданные готовы</div>
-      <div class="mrow"><b>Описание:</b> ${esc(a.meta.description)}</div>
-      <div class="mrow"><b>Категории:</b> ${esc(a.meta.category1)}${a.meta.category2 ? ', ' + esc(a.meta.category2) : ''}</div>
-      <div class="mrow"><b>Ключевые слова (${a.meta.keywords.length}):</b> ${a.meta.keywords.map(esc).join(', ')}</div>
-    </div>`;
-  } else if (a.status === 'approved') {
-    meta = `<div class="meta-block"><div class="mtitle err">✗ Метаданные не сгенерированы</div>
-      <div class="mrow">Нажмите «⚙ Описать одобренные» в шапке, чтобы сгенерировать.</div></div>`;
-  }
   $('#lbInfo').innerHTML =
     `<span class="badge ${cls}">${txt}</span><span class="cat">${esc(a.category || '')}</span>`
-    + flags + `<div class="reason">${esc(a.reason || '')}</div>` + meta + log;
+    + flags + `<div class="reason">${esc(a.reason || '')}</div>` + metaBlock(a) + log;
 }
 function nav(d) { idx = (idx + d + items.length) % items.length; renderLb(); }
 
@@ -397,11 +427,22 @@ function renderBanner() {
   if (pile !== 'approved') { bar.style.display = 'none'; return; }
   const total = summary.approved || 0, pending = summary.meta_pending || 0, ready = total - pending;
   bar.style.display = 'block';
+  if (upPoll && upStatus) {                       // идёт выгрузка на сток
+    const seen = upStatus.uploaded + upStatus.errors, t = upStatus.total;
+    const pct = t ? Math.round(seen / t * 100) : 0;
+    bar.className = 'run';
+    bar.innerHTML = `Выгружаю на Shutterstock: ${t ? seen + '/' + t : 'подключаюсь…'}`
+      + (upStatus.errors ? ` · ошибок ${upStatus.errors}` : '')
+      + `<span class="barbar"><span style="width:${pct}%"></span></span>`;
+    return;
+  }
   if (metaPoll) { bar.className = 'run'; bar.textContent = 'Генерация метаданных идёт…'; return; }
   if (total === 0) { bar.style.display = 'none'; return; }
   if (pending === 0) {
     bar.className = 'ok';
-    bar.textContent = `✓ Метаданные готовы для всех ${ready} фото.`;
+    bar.innerHTML = `✓ Метаданные готовы для всех ${ready} фото. `
+      + `<button class="btn up" id="barUpload">⬆ Выгрузить всё на сток (${ready})</button>`;
+    $('#barUpload').onclick = startUpload;
   } else {
     bar.className = 'err';
     bar.innerHTML = `✗ Метаданные не сгенерированы для ${pending} фото`
@@ -452,8 +493,44 @@ $('#metaBtn').onclick = startMeta;
 $('#offerRun').onclick = startMeta;
 $('#offerLater').onclick = () => $('#offerModal').classList.remove('open');
 
-// при загрузке: если генерация уже идёт (перезагрузили страницу) — подхватить
+// --- выгрузка на Shutterstock: кнопка в баннере / прогресс / коллекция ---
+async function startUpload() {
+  const r = await fetch('/api/upload/run', { method: 'POST' });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    if (j.error === 'no_creds') {
+      alert('Не заданы доступы Shutterstock: впишите STOCKER_SHUTTERSTOCK_USER и STOCKER_SHUTTERSTOCK_PASSWORD в файл .env и перезапустите сервер.');
+      return;
+    }
+    if (r.status === 409) { pollUpload(); return; } // уже идёт — просто подхватим
+  }
+  upStatus = { running: true, total: 0, uploaded: 0, errors: 0 };
+  pollUpload();
+}
+function pollUpload() {
+  if (upPoll) return;
+  const tick = async () => {
+    const st = await api('/api/upload/status');
+    upStatus = st;
+    if (st.running) { if (pile === 'approved') renderBanner(); return; }
+    clearInterval(upPoll); upPoll = null;
+    if (st.error && st.error !== 'no_creds') alert('Ошибка выгрузки: ' + st.error);
+    await refreshCounts();
+    if (pile === 'approved') loadPile('approved'); // выгруженные ушли из «Одобрено»
+    if (st.uploaded > 0 && st.csv_path) {
+      $('#udN').textContent = st.uploaded;
+      $('#udCsv').textContent = st.csv_path;
+      $('#uploadDoneModal').classList.add('open');
+    }
+  };
+  upPoll = setInterval(tick, 1200);
+  tick();
+}
+$('#udClose').onclick = () => $('#uploadDoneModal').classList.remove('open');
+
+// при загрузке: если генерация/выгрузка уже идёт (перезагрузили страницу) — подхватить
 api('/api/metadata/status').then(st => { if (st.running) pollMeta(); });
+api('/api/upload/status').then(st => { if (st.running) { upStatus = st; pollUpload(); } });
 
 loadPile('stock_candidate');
 </script>
