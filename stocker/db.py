@@ -17,8 +17,12 @@ log = logging.getLogger(__name__)
 
 # --- Значения статуса в конвейере (колонка assets.status) ------------------
 STATUS_NEW = "new"  # принят, ещё не классифицирован
-STATUS_STOCK_CANDIDATE = "stock_candidate"  # прошёл классификатор как сток
-STATUS_NON_STOCK = "non_stock"  # отсеян классификатором (корзина, не удаление)
+# Кучи после классификатора (необработанные, ждут ревью пользователя):
+STATUS_STOCK_CANDIDATE = "stock_candidate"  # ИИ считает стоком
+STATUS_NON_STOCK = "non_stock"  # ИИ отсеял
+# Кучи после ревью пользователя (обработанные):
+STATUS_APPROVED = "approved"  # одобрено, в очередь на отправку
+STATUS_REJECTED = "rejected"  # забраковано пользователем
 
 
 # --- Миграции --------------------------------------------------------------
@@ -71,10 +75,60 @@ def _migrate_v2_classification(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
 
 
+def _migrate_v3_prompts(conn: sqlite3.Connection) -> None:
+    """v3: версионируемый промпт классификатора (``classifier_prompts``) + засев.
+
+    Промпт больше не хардкодится в рантайме — классификатор читает активную
+    версию отсюда. При инициализации засевается стартовая версия, чтобы
+    установка «с нуля» сразу работала.
+    """
+    from . import prompts
+
+    conn.execute(
+        """
+        CREATE TABLE classifier_prompts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            version    INTEGER NOT NULL,
+            text       TEXT    NOT NULL,
+            note       TEXT,
+            source     TEXT    NOT NULL DEFAULT 'manual',
+            is_active  INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT    NOT NULL
+        )
+        """
+    )
+    prompts.seed_if_empty(conn)
+
+
+def _migrate_v4_feedback(conn: sqlite3.Connection) -> None:
+    """v4: правки пользователя по снимкам для доработки промпта (``feedback``).
+
+    Каждая запись — решение «в сток / из стока» с пояснением. Перед новым
+    прогоном классификатор скармливает необработанные правки умной модели,
+    которая предлагает улучшенную версию промпта.
+    """
+    conn.execute(
+        """
+        CREATE TABLE feedback (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_id       INTEGER REFERENCES assets(id),
+            decision       TEXT    NOT NULL,   -- to_stock | from_stock
+            comment        TEXT,
+            prompt_version INTEGER,            -- активная версия на момент правки
+            processed      INTEGER NOT NULL DEFAULT 0,
+            created_at     TEXT    NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX idx_feedback_processed ON feedback(processed)")
+
+
 # Порядковый список миграций; индекс+1 = целевая версия схемы.
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_assets,
     _migrate_v2_classification,
+    _migrate_v3_prompts,
+    _migrate_v4_feedback,
 ]
 
 # Текущая версия схемы = число применённых миграций.

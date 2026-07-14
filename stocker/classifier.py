@@ -24,6 +24,8 @@ from .db import (
     STATUS_STOCK_CANDIDATE,
     get_connection,
 )
+from .improver import improve_prompt
+from .prompts import get_active_prompt
 
 log = logging.getLogger(__name__)
 
@@ -31,20 +33,9 @@ log = logging.getLogger(__name__)
 MODEL = "claude-haiku-4-5"
 MAX_TOKENS = 1024
 
-# Стартовый промпт. Критерии «стоковости» уточняются на выборке (Шаг 4).
-SYSTEM_PROMPT = (
-    "Ты — ассистент фотостокового отбора. По фотографии реши, годится ли она "
-    "как коммерческий сток, или это бытовой семейный снимок либо мусор "
-    "(документ, скриншот, фото счётчика, фото для жалобы, случайный кадр).\n"
-    "Критерии стоковости: чёткая тема, техническое качество, потенциальная "
-    "коммерческая или редакционная ценность. Отвечай строго по схеме. "
-    "Поля reason и notes — на русском, кратко. category — короткая стоковая "
-    "категория (например «природа», «еда», «люди», «бизнес»); для нестокового "
-    'используй "нет". Флаги has_logo/has_brand/has_text — виден ли на кадре '
-    "логотип, узнаваемый бренд, читаемый текст (важно для комплаенса)."
-)
-
-USER_PROMPT = "Оцени этот снимок как кандидата на микросток."
+# Системный промпт версионируется и хранится в БД (см. prompts.py); он больше
+# не константа. Здесь — только неизменная реплика пользователя к каждому кадру.
+USER_PROMPT = "Оцени этот снимок как кандидата на коммерческий микросток."
 
 # JSON-схема вердикта — гарантирует разбираемый структурированный ответ.
 _VERDICT_SCHEMA = {
@@ -75,12 +66,14 @@ def _encode_image(path: Path) -> str:
     return base64.standard_b64encode(path.read_bytes()).decode("ascii")
 
 
-def _classify_image(client: anthropic.Anthropic, preview_path: Path) -> dict[str, object]:
+def _classify_image(
+    client: anthropic.Anthropic, preview_path: Path, system_prompt: str
+) -> dict[str, object]:
     """Один vision-запрос к Haiku; возвращает разобранный вердикт."""
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[
             {
                 "role": "user",
@@ -150,6 +143,14 @@ def run_classification(cfg: Config) -> dict[str, int]:
 
     conn = get_connection(cfg.db_path)
     try:
+        # Перед разбором новой пачки — доработать промпт по накопленным правкам.
+        try:
+            improve_prompt(conn, client)
+        except Exception:
+            log.exception(
+                "Не удалось доработать промпт по правкам; продолжаю на текущей версии"
+            )
+        system_prompt = get_active_prompt(conn)  # активная версия из БД
         rows = conn.execute(
             "SELECT id, preview_path FROM assets WHERE status = ?", (STATUS_NEW,)
         ).fetchall()
@@ -157,7 +158,9 @@ def run_classification(cfg: Config) -> dict[str, int]:
 
         for row in rows:
             try:
-                verdict = _classify_image(client, Path(row["preview_path"]))
+                verdict = _classify_image(
+                    client, Path(row["preview_path"]), system_prompt
+                )
                 _apply_verdict(conn, row["id"], verdict)
                 conn.commit()
                 if verdict["stock_worthy"]:
