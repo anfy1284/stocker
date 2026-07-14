@@ -179,18 +179,23 @@ def run_upload(
             _write_csv(records, csv_path)
             return stats
 
-        # Пробный прогон или нет доступов: пишем CSV по всем кандидатам, не льём.
-        if dry_run or not cfg.has_ftps_creds:
-            _write_csv(records, csv_path)
-            if dry_run:
-                log.info("Пробный прогон: CSV на %d снимков — %s", len(records), csv_path)
-            else:
-                log.warning(
-                    "FTPS-доступы не заданы (STOCKER_SHUTTERSTOCK_USER/"
-                    "STOCKER_SHUTTERSTOCK_PASSWORD в .env) — заливка пропущена, "
-                    "готов только CSV: %s",
-                    csv_path,
-                )
+        # CSV пишем СРАЗУ, до заливки: имена файлов детерминированы (<id>_…), так
+        # что он уже совпадает с тем, что ляжет на сервер. Заливка бывает долгой —
+        # веб-интерфейс скачивает CSV пользователю, не дожидаясь её конца.
+        _write_csv(records, csv_path)
+        if on_progress:
+            on_progress(dict(stats))
+
+        if dry_run:
+            log.info("Пробный прогон: CSV на %d снимков — %s", len(records), csv_path)
+            return stats
+        if not cfg.has_ftps_creds:
+            log.warning(
+                "FTPS-доступы не заданы (STOCKER_SHUTTERSTOCK_USER/"
+                "STOCKER_SHUTTERSTOCK_PASSWORD в .env) — заливка пропущена, "
+                "готов только CSV: %s",
+                csv_path,
+            )
             return stats
 
         # Реальная заливка: коннектимся и льём оригиналы по одному.
@@ -199,12 +204,8 @@ def run_upload(
             ftp = _ftps_connect(cfg)
         except Exception as exc:  # noqa: BLE001 — показываем причину пользователю
             log.error("Не удалось подключиться к %s: %s", FTPS_HOST, exc)
-            _write_csv(records, csv_path)  # CSV всё равно оставляем пользователю
             stats["error"] = str(exc)
             return stats
-        uploaded: list[dict] = []
-        if on_progress:
-            on_progress(dict(stats))
         try:
             now = datetime.now().isoformat()
             for r in records:
@@ -217,7 +218,6 @@ def run_upload(
                         (STATUS_UPLOADED, r["upload_name"], now, r["id"]),
                     )
                     conn.commit()
-                    uploaded.append(r)
                     stats["uploaded"] += 1
                     log.info(
                         "Залит снимок %d → %s (%d/%d)",
@@ -237,8 +237,6 @@ def run_upload(
             except Exception:
                 ftp.close()
 
-        # CSV описывает ровно то, что легло на сервер (сопоставление по Filename).
-        _write_csv(uploaded, csv_path)
         stats["sent"] = True
     finally:
         conn.close()

@@ -92,8 +92,8 @@ def create_app(cfg: Config | None = None) -> Flask:
         "total": 0,
         "uploaded": 0,
         "errors": 0,
-        "error": None,   # фатальная ошибка (нет доступов, обрыв соединения)
-        "csv_path": None,
+        "error": None,     # фатальная ошибка (нет доступов, обрыв соединения)
+        "csv_name": None,  # имя готового CSV в export_dir (для скачивания в браузер)
     }
 
     def _upload_worker():
@@ -103,12 +103,15 @@ def create_app(cfg: Config | None = None) -> Flask:
                     total=stats["total"],
                     uploaded=stats["uploaded"],
                     errors=stats["errors"],
+                    # CSV пишется до заливки — имя появляется с первым же прогрессом,
+                    # веб успевает скачать файл, не дожидаясь конца заливки.
+                    csv_name=Path(stats["csv_path"]).name,
                 )
 
         try:
             stats = upload.run_upload(cfg, on_progress=on_progress)
             with up_lock:
-                up_state["csv_path"] = stats["csv_path"]
+                up_state["csv_name"] = Path(stats["csv_path"]).name
                 if stats.get("error"):
                     up_state["error"] = stats["error"]
         except Exception as exc:  # noqa: BLE001 — показываем текст пользователю
@@ -323,6 +326,16 @@ def create_app(cfg: Config | None = None) -> Flask:
             state = dict(up_state)
         state["has_creds"] = cfg.has_ftps_creds
         return jsonify(state)
+
+    @app.get("/api/upload/csv/<path:name>")
+    def upload_csv(name: str):
+        """Отдаёт готовый CSV из export_dir на скачивание в браузер.
+
+        Файл сформирован до заливки — пользователь может скачать его сразу
+        (и повторно), даже если сидит не за серверным ПК. ``send_from_directory``
+        сам защищает от выхода за пределы каталога.
+        """
+        return send_from_directory(cfg.export_dir, name, as_attachment=True)
 
     @app.get("/api/prompts")
     def prompt_list():

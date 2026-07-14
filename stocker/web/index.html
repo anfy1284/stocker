@@ -165,10 +165,10 @@
 
 <div class="modal" id="uploadDoneModal"><div class="modal-box">
   <h3>Изображения выгружены</h3>
-  <p style="color:#57534e;font-size:14px;margin:0 0 8px">Залито на Shutterstock: <b id="udN">0</b> фото. Осталось применить метаданные на сайте (Shutterstock не принимает CSV по FTPS):</p>
+  <p style="color:#57534e;font-size:14px;margin:0 0 8px">Залито на Shutterstock: <b id="udN">0</b> фото. CSV с метаданными уже скачан на это устройство. Осталось применить его на сайте (Shutterstock не принимает CSV по FTPS):</p>
   <ol style="color:#1c1917;font-size:14px;line-height:1.6;margin:0 0 4px;padding-left:20px">
-    <li>Открой <b>submit.shutterstock.com</b> → кнопка «CSV» вверху.</li>
-    <li>Выбери файл:<br><code id="udCsv" style="font-size:12px;word-break:break-all;background:#fafaf9;padding:2px 4px;border-radius:4px"></code></li>
+    <li>Открой <a href="https://submit.shutterstock.com" target="_blank" rel="noopener"><b>submit.shutterstock.com</b></a> → кнопка «CSV» вверху.</li>
+    <li>Выбери файл: <a id="udCsv" href="#" download>—</a> <span style="color:#78716c;font-size:12px">(нажми, чтобы скачать снова)</span></li>
     <li>Проверь и нажми Submit.</li>
   </ol>
   <div class="modal-actions"><button class="btn" id="udClose" style="background:#1c1917;color:#fff">Понятно</button></div>
@@ -211,6 +211,7 @@ let metaPoll = null;     // id интервала опроса статуса г
 let offeredMeta = false; // предложение «запустить» показываем один раз за сессию
 let upPoll = null;       // id интервала опроса статуса выгрузки
 let upStatus = null;     // последний ответ /api/upload/status (для прогресса)
+let upCsvDownloaded = false; // авто-скачивание CSV делаем один раз за выгрузку
 
 function fmtDate(iso) {
   const d = new Date(iso);
@@ -552,6 +553,7 @@ async function startUpload() {
     `${n} фото будут залиты на твой аккаунт Shutterstock по FTPS. Действие необратимо — снятие с публикации делается только на сайте.`,
     'Выгрузить', '#6d28d9');
   if (!ok) return;
+  upCsvDownloaded = false;
   const r = await fetch('/api/upload/run', { method: 'POST' });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
@@ -564,19 +566,29 @@ async function startUpload() {
   upStatus = { running: true, total: 0, uploaded: 0, errors: 0 };
   pollUpload();
 }
+function csvUrl(name) { return '/api/upload/csv/' + encodeURIComponent(name); }
+function downloadCsv(name) {
+  const a = document.createElement('a');
+  a.href = csvUrl(name); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
 function pollUpload() {
   if (upPoll) return;
   const tick = async () => {
     const st = await api('/api/upload/status');
     upStatus = st;
+    // CSV готов ещё до конца заливки — скачиваем его пользователю сразу, один раз.
+    if (st.csv_name && !upCsvDownloaded) { upCsvDownloaded = true; downloadCsv(st.csv_name); }
     if (st.running) { if (pile === 'approved') renderBanner(); return; }
     clearInterval(upPoll); upPoll = null;
     if (st.error && st.error !== 'no_creds') alert('Ошибка выгрузки: ' + st.error);
     await refreshCounts();
     if (pile === 'approved') loadPile('approved'); // выгруженные ушли из «Одобрено»
-    if (st.uploaded > 0 && st.csv_path) {
+    if (st.uploaded > 0 && st.csv_name) {
       $('#udN').textContent = st.uploaded;
-      $('#udCsv').textContent = st.csv_path;
+      const link = $('#udCsv');
+      link.textContent = st.csv_name;
+      link.href = csvUrl(st.csv_name);
       $('#uploadDoneModal').classList.add('open');
     }
   };
