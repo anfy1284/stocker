@@ -82,7 +82,9 @@
                        font-size: 16px; cursor: pointer; }
   .btn-no { background: #dc2626; color: #fff; }
   .btn-ok { background: #16a34a; color: #fff; }
-  @media (max-width: 760px) {
+  /* Узкие экраны И сенсорные устройства (планшеты/айпад): картинка сверху,
+     описание и кнопки снизу под большой палец — а не боковой панелью. */
+  @media (max-width: 760px), (pointer: coarse) {
     .lb.open { flex-direction: column; }
     .lb-stage { flex: 1; min-height: 0; }
     .lb-panel { width: 100%; max-height: 45vh; }
@@ -146,10 +148,11 @@
 
 <div class="modal" id="commentModal"><div class="modal-box">
   <h3 id="cmTitle">Поясните решение</h3>
-  <p style="color:#78716c;font-size:13px;margin:0 0 8px">Ваше решение расходится с ИИ. Коротко объясните — это улучшит будущий отбор.</p>
+  <p style="color:#78716c;font-size:13px;margin:0 0 8px">Ваше решение расходится с ИИ. Можно коротко объяснить — это улучшит будущий отбор. Пояснение необязательно.</p>
   <textarea id="cmText" placeholder="например: на фото блики от стекла"></textarea>
   <div class="modal-actions">
     <button class="btn" id="cmCancel">Отмена</button>
+    <button class="btn" id="cmSkip">Пропустить</button>
     <button class="btn" id="cmOk" style="background:#1c1917;color:#fff">Сохранить</button>
   </div>
 </div></div>
@@ -338,23 +341,25 @@ async function decide(action) {
   renderLb(); renderGrid();
 }
 
-// диалог комментария (промис: текст или null при отмене)
+// диалог комментария (промис: текст, '' — применить без пояснения, null — отмена)
 let cmResolve = null;
 function askComment(action) {
   return new Promise(res => {
     cmResolve = res;
-    $('#cmTitle').textContent = action === 'approve' ? 'В сток вопреки ИИ — поясните' : 'Из стока вопреки ИИ — поясните';
+    $('#cmTitle').textContent = action === 'approve' ? 'В сток вопреки ИИ' : 'Из стока вопреки ИИ';
     $('#cmText').value = '';
     $('#commentModal').classList.add('open');
     setTimeout(() => $('#cmText').focus(), 50);
   });
 }
+function _closeComment(val) { $('#commentModal').classList.remove('open'); cmResolve(val); }
 $('#cmOk').onclick = () => {
   const t = $('#cmText').value.trim();
   if (!t) { $('#cmText').focus(); return; }
-  $('#commentModal').classList.remove('open'); cmResolve(t);
+  _closeComment(t);
 };
-$('#cmCancel').onclick = () => { $('#commentModal').classList.remove('open'); cmResolve(null); };
+$('#cmSkip').onclick = () => _closeComment('');    // применить решение без пояснения
+$('#cmCancel').onclick = () => _closeComment(null); // отменить само решение
 
 // диалог подтверждения (промис: true/false) — для необратимых массовых действий
 let cfResolve = null;
