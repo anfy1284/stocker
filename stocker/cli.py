@@ -11,6 +11,7 @@ import argparse
 import logging
 import sys
 
+from .classifier import run_classification
 from .config import Config, load_config
 from .db import init_db
 from .intake import run_intake
@@ -51,6 +52,17 @@ def cmd_intake(cfg: Config) -> int:
     return 0
 
 
+def cmd_classify(cfg: Config) -> int:
+    cfg.ensure_dirs()
+    init_db(cfg.db_path)
+    try:
+        run_classification(cfg)
+    except RuntimeError as exc:
+        log.error("%s", exc)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stocker",
@@ -60,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="Создать каталоги и пустую БД (по умолчанию).")
     sub.add_parser("config", help="Показать текущую конфигурацию.")
     sub.add_parser("intake", help="Принять новые файлы из папки-входящих.")
+    sub.add_parser("classify", help="Классифицировать новые снимки (сток/не-сток).")
     return parser
 
 
@@ -75,4 +88,6 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_config(cfg)
     if command == "intake":
         return cmd_intake(cfg)
+    if command == "classify":
+        return cmd_classify(cfg)
     return cmd_init(cfg)

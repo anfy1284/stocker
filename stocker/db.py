@@ -16,7 +16,9 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 # --- Значения статуса в конвейере (колонка assets.status) ------------------
-STATUS_NEW = "new"  # принят, ещё не классифицирован (Шаг 3 двинет дальше)
+STATUS_NEW = "new"  # принят, ещё не классифицирован
+STATUS_STOCK_CANDIDATE = "stock_candidate"  # прошёл классификатор как сток
+STATUS_NON_STOCK = "non_stock"  # отсеян классификатором (корзина, не удаление)
 
 
 # --- Миграции --------------------------------------------------------------
@@ -50,9 +52,29 @@ def _migrate_v1_assets(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX idx_assets_status ON assets(status)")
 
 
+def _migrate_v2_classification(conn: sqlite3.Connection) -> None:
+    """v2 (Шаг 3, классификация): поля вердикта «сток/не-сток» в ``assets``.
+
+    Заполняются классификатором; до его прогона — NULL. Флаги комплаенса
+    (логотип/бренд/текст) хранятся как 0/1.
+    """
+    for column, coltype in (
+        ("stock_worthy", "INTEGER"),
+        ("classification_reason", "TEXT"),
+        ("category", "TEXT"),
+        ("has_logo", "INTEGER"),
+        ("has_brand", "INTEGER"),
+        ("has_text", "INTEGER"),
+        ("classification_notes", "TEXT"),
+        ("classified_at", "TEXT"),
+    ):
+        conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
+
+
 # Порядковый список миграций; индекс+1 = целевая версия схемы.
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_assets,
+    _migrate_v2_classification,
 ]
 
 # Текущая версия схемы = число применённых миграций.
