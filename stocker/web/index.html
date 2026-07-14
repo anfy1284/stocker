@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Stocker — ревью</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; background: #f5f5f4; color: #1c1917; }
+  header { position: sticky; top: 0; background: #fff; border-bottom: 1px solid #ddd;
+           padding: 8px 10px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; z-index: 10; }
+  header b { font-size: 15px; margin-right: 6px; }
+  .tab, .btn { font: inherit; padding: 7px 12px; border: 1px solid #ccc; border-radius: 6px;
+               background: #fff; cursor: pointer; }
+  .tab.active { background: #1c1917; color: #fff; border-color: #1c1917; }
+  #promptsBtn { margin-left: auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+          gap: 10px; padding: 12px; }
+  .card { background: #fff; border: 1px solid #e7e5e4; border-radius: 8px; overflow: hidden; cursor: pointer; }
+  .card img { width: 100%; height: 140px; object-fit: cover; background: #eee; display: block; }
+  .card .cap { padding: 6px 8px; font-size: 11px; color: #78716c; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; }
+  .badge { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; }
+  .badge.ok { background: #dcfce7; color: #166534; }
+  .badge.no { background: #fee2e2; color: #991b1b; }
+  .badge.approved { background: #dbeafe; color: #1e40af; }
+  .badge.rejected { background: #f3f4f6; color: #4b5563; }
+  #empty { padding: 40px; text-align: center; color: #a8a29e; }
+
+  /* лайтбокс: десктоп — картинка слева, панель справа; мобила — столбиком */
+  .lb { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.93); z-index: 100; }
+  .lb.open { display: flex; flex-direction: row; }
+  .lb-stage { flex: 1; position: relative; overflow: hidden; display: flex;
+              align-items: center; justify-content: center; min-width: 0; }
+  #lbImg { max-width: 100%; max-height: 100vh; object-fit: contain; touch-action: pan-y;
+           transition: transform .05s linear; }
+  .lb-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(0,0,0,.4);
+            color: #fff; border: none; font-size: 30px; width: 44px; height: 64px; cursor: pointer; border-radius: 6px; }
+  #lbPrev { left: 8px; } #lbNext { right: 8px; }
+  #lbClose { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,.4); color: #fff;
+             border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; z-index: 2; }
+  .swipe-hint { position: absolute; top: 50%; transform: translateY(-50%); font-size: 48px;
+                font-weight: 800; opacity: 0; pointer-events: none; transition: opacity .1s; }
+  #hintOk { right: 24px; color: #22c55e; } #hintNo { left: 24px; color: #ef4444; }
+  .lb-panel { width: 360px; background: #1c1917; color: #e7e5e4; display: flex; flex-direction: column; }
+  .lb-info { flex: 1; padding: 16px; overflow-y: auto; }
+  .lb-info .cat { color: #a8a29e; margin-left: 6px; }
+  .lb-info .reason { margin: 8px 0; font-size: 14px; line-height: 1.5; }
+  .lb-info .flags { color: #fbbf24; font-size: 12px; margin-bottom: 6px; }
+  .lb-info .clog { border-top: 1px solid #44403c; margin-top: 8px; padding-top: 8px; }
+  .lb-info .clog div { font-size: 12.5px; color: #d6d3d1; margin-bottom: 4px; }
+  .lb-actions { display: flex; gap: 10px; padding: 12px 16px 16px; }
+  .lb-actions button { flex: 1; padding: 15px; font-weight: 700; border: none; border-radius: 8px;
+                       font-size: 16px; cursor: pointer; }
+  .btn-no { background: #dc2626; color: #fff; }
+  .btn-ok { background: #16a34a; color: #fff; }
+  @media (max-width: 760px) {
+    .lb.open { flex-direction: column; }
+    .lb-stage { flex: 1; min-height: 0; }
+    .lb-panel { width: 100%; max-height: 45vh; }
+  }
+
+  /* модалки */
+  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 200;
+           align-items: center; justify-content: center; padding: 16px; }
+  .modal.open { display: flex; }
+  .modal-box { background: #fff; border-radius: 10px; padding: 18px; width: 100%; max-width: 480px;
+               max-height: 90vh; overflow-y: auto; }
+  .modal-box h3 { margin: 0 0 10px; }
+  .modal-box textarea { width: 100%; min-height: 90px; font: inherit; padding: 8px; border: 1px solid #ccc;
+                        border-radius: 6px; resize: vertical; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .pv { border: 1px solid #e7e5e4; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+  .pv.active { border-color: #16a34a; background: #f0fdf4; }
+  .pv .meta { font-size: 12px; color: #78716c; margin-bottom: 6px; }
+  .pv .txt { font-size: 12px; white-space: pre-wrap; max-height: 120px; overflow-y: auto;
+             background: #fafaf9; padding: 6px; border-radius: 4px; }
+  .pv .row { display: flex; gap: 6px; margin-top: 8px; }
+  .src-seed { color: #78716c; } .src-manual { color: #1e40af; } .src-ai { color: #7c3aed; }
+</style></head><body>
+
+<header>
+  <b>Stocker — ревью</b>
+  <button class="tab active" data-s="stock_candidate">Сток <span>0</span></button>
+  <button class="tab" data-s="non_stock">Не-Сток <span>0</span></button>
+  <button class="tab" data-s="approved">Одобрено <span>0</span></button>
+  <button class="tab" data-s="rejected">Брак <span>0</span></button>
+  <button class="btn" id="promptsBtn">Промпты</button>
+</header>
+
+<div class="grid" id="grid"></div>
+<div id="empty" style="display:none">Здесь пусто — необработанных снимков нет.</div>
+
+<div class="lb" id="lb">
+  <div class="lb-stage">
+    <button id="lbClose">✕</button>
+    <button class="lb-nav" id="lbPrev">‹</button>
+    <span class="swipe-hint" id="hintNo">БРАК</span>
+    <img id="lbImg" src="" alt="">
+    <span class="swipe-hint" id="hintOk">В СТОК</span>
+    <button class="lb-nav" id="lbNext">›</button>
+  </div>
+  <div class="lb-panel">
+    <div class="lb-info" id="lbInfo"></div>
+    <div class="lb-actions">
+      <button class="btn-no" id="btnReject">✕ Из стока</button>
+      <button class="btn-ok" id="btnApprove">✓ В сток</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="commentModal"><div class="modal-box">
+  <h3 id="cmTitle">Поясните решение</h3>
+  <p style="color:#78716c;font-size:13px;margin:0 0 8px">Ваше решение расходится с ИИ. Коротко объясните — это улучшит будущий отбор.</p>
+  <textarea id="cmText" placeholder="например: на фото блики от стекла"></textarea>
+  <div class="modal-actions">
+    <button class="btn" id="cmCancel">Отмена</button>
+    <button class="btn" id="cmOk" style="background:#1c1917;color:#fff">Сохранить</button>
+  </div>
+</div></div>
+
+<div class="modal" id="promptsModal"><div class="modal-box">
+  <h3>История промптов</h3>
+  <div id="promptList"></div>
+  <div class="modal-actions"><button class="btn" id="pmClose">Закрыть</button></div>
+</div></div>
+
+<div class="modal" id="editModal"><div class="modal-box">
+  <h3>Редактирование промпта</h3>
+  <p style="color:#78716c;font-size:13px;margin:0 0 8px">Сохранение создаёт новую версию и делает её активной.</p>
+  <textarea id="edText" style="min-height:240px"></textarea>
+  <div class="modal-actions">
+    <button class="btn" id="edCancel">Отмена</button>
+    <button class="btn" id="edSave" style="background:#1c1917;color:#fff">Сохранить как новую версию</button>
+  </div>
+</div></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = (u, opt) => fetch(u, opt).then(r => r.json());
+let pile = 'stock_candidate';
+let items = [];
+let idx = 0;
+
+function fmtDate(iso) {
+  const d = new Date(iso);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getDate())}.${p(d.getMonth()+1)}.${String(d.getFullYear()).slice(2)} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function badgeFor(s) {
+  return { stock_candidate:['ok','СТОК'], non_stock:['no','НЕ-СТОК'],
+           approved:['approved','ОДОБРЕНО'], rejected:['rejected','БРАК'] }[s];
+}
+
+async function refreshCounts() {
+  const c = await api('/api/summary');
+  document.querySelectorAll('.tab').forEach(t => t.querySelector('span').textContent = c[t.dataset.s] ?? 0);
+}
+let assetsCtrl = null;
+async function loadPile(s) {
+  window.stop();                       // оборвать текущие загрузки (картинки прошлой кучи)
+  if (assetsCtrl) assetsCtrl.abort();  // отменить висящий запрос списка
+  assetsCtrl = new AbortController();
+  pile = s;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.s === s));
+  $('#grid').innerHTML = '';           // мгновенная реакция, не ждём сеть
+  try {
+    items = await fetch('/api/assets?status=' + s, { signal: assetsCtrl.signal }).then(r => r.json());
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    throw e;
+  }
+  renderGrid();
+  refreshCounts();
+}
+function renderGrid() {
+  const g = $('#grid');
+  g.innerHTML = '';
+  $('#empty').style.display = items.length ? 'none' : 'block';
+  items.forEach((a, i) => {
+    const [cls, txt] = badgeFor(a.status);
+    const d = document.createElement('div');
+    d.className = 'card';
+    d.innerHTML = `<img loading="lazy" decoding="async" src="/thumb/${a.preview}">
+      <div class="cap"><span class="badge ${cls}">${txt}</span> ${a.category || ''}</div>`;
+    d.onclick = () => openLb(i);
+    g.appendChild(d);
+  });
+}
+
+// --- лайтбокс ---
+function openLb(i) { idx = i; renderLb(); $('#lb').classList.add('open'); }
+function closeLb() { $('#lb').classList.remove('open'); }
+function renderLb() {
+  if (!items.length) { closeLb(); return; }
+  if (idx >= items.length) idx = items.length - 1;
+  const a = items[idx];
+  $('#lbImg').src = '/previews/' + a.preview;
+  $('#lbImg').style.transform = '';
+  const [cls, txt] = badgeFor(a.status);
+  let log = '';
+  if (a.comments && a.comments.length) {
+    log = '<div class="clog">' + a.comments.map(c =>
+      `<div>комментарий пользователя от ${fmtDate(c.at)}: ${c.text}</div>`).join('') + '</div>';
+  }
+  const flags = a.flags && a.flags.length ? `<div class="flags">⚠ ${a.flags.join(', ')}</div>` : '';
+  $('#lbInfo').innerHTML =
+    `<span class="badge ${cls}">${txt}</span><span class="cat">${a.category || ''}</span>`
+    + flags + `<div class="reason">${a.reason || ''}</div>` + log;
+}
+function nav(d) { idx = (idx + d + items.length) % items.length; renderLb(); }
+
+// решение: approve|reject; при расхождении с ИИ — просим комментарий
+function isContradiction(a, action) {
+  return (action === 'approve' && a.status === 'non_stock')
+      || (action === 'reject'  && a.status === 'stock_candidate');
+}
+async function decide(action) {
+  const a = items[idx];
+  if (!a) return;
+  let comment = '';
+  if (isContradiction(a, action)) {
+    comment = await askComment(action);
+    if (comment === null) return; // отмена — решение не применяем
+  }
+  await api(`/api/assets/${a.id}/decision`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ action, comment })
+  });
+  items.splice(idx, 1);   // ушёл из текущей кучи
+  refreshCounts();
+  if (!items.length) { closeLb(); renderGrid(); return; }
+  renderLb(); renderGrid();
+}
+
+// диалог комментария (промис: текст или null при отмене)
+let cmResolve = null;
+function askComment(action) {
+  return new Promise(res => {
+    cmResolve = res;
+    $('#cmTitle').textContent = action === 'approve' ? 'В сток вопреки ИИ — поясните' : 'Из стока вопреки ИИ — поясните';
+    $('#cmText').value = '';
+    $('#commentModal').classList.add('open');
+    setTimeout(() => $('#cmText').focus(), 50);
+  });
+}
+$('#cmOk').onclick = () => {
+  const t = $('#cmText').value.trim();
+  if (!t) { $('#cmText').focus(); return; }
+  $('#commentModal').classList.remove('open'); cmResolve(t);
+};
+$('#cmCancel').onclick = () => { $('#commentModal').classList.remove('open'); cmResolve(null); };
+
+// --- свайп (Tinder) ---
+let sx = 0, sdx = 0, swiping = false;
+const img = $('#lbImg');
+img.addEventListener('touchstart', e => { sx = e.touches[0].clientX; sdx = 0; swiping = true; }, {passive:true});
+img.addEventListener('touchmove', e => {
+  if (!swiping) return;
+  sdx = e.touches[0].clientX - sx;
+  img.style.transform = `translateX(${sdx}px) rotate(${sdx/25}deg)`;
+  $('#hintOk').style.opacity = sdx > 30 ? Math.min(1, sdx/120) : 0;
+  $('#hintNo').style.opacity = sdx < -30 ? Math.min(1, -sdx/120) : 0;
+}, {passive:true});
+img.addEventListener('touchend', () => {
+  swiping = false;
+  $('#hintOk').style.opacity = 0; $('#hintNo').style.opacity = 0;
+  img.style.transform = '';
+  if (sdx > 70) decide('approve');
+  else if (sdx < -70) decide('reject');
+});
+
+$('#btnApprove').onclick = () => decide('approve');
+$('#btnReject').onclick = () => decide('reject');
+$('#lbPrev').onclick = () => nav(-1);
+$('#lbNext').onclick = () => nav(1);
+$('#lbClose').onclick = closeLb;
+document.addEventListener('keydown', e => {
+  if (!$('#lb').classList.contains('open')) return;
+  if (e.key === 'ArrowLeft') nav(-1);
+  else if (e.key === 'ArrowRight') nav(1);
+  else if (e.key === 'Escape') closeLb();
+});
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => loadPile(t.dataset.s));
+
+// --- промпты ---
+async function openPrompts() {
+  const vers = await api('/api/prompts');
+  $('#promptList').innerHTML = vers.map(v => `
+    <div class="pv ${v.active ? 'active' : ''}">
+      <div class="meta">v${v.version} · <span class="src-${v.source}">${v.source}</span> · ${fmtDate(v.at)}
+        ${v.active ? '· <b>активна</b>' : ''}</div>
+      <div style="font-size:13px;margin-bottom:4px">${v.note || ''}</div>
+      <div class="txt">${(v.text || '').replace(/</g,'&lt;')}</div>
+      <div class="row">
+        ${v.active ? '' : `<button class="btn" onclick="activatePrompt(${v.version})">Активировать (откат)</button>`}
+        <button class="btn" onclick='editPrompt(${JSON.stringify(v.text)})'>Редактировать</button>
+      </div>
+    </div>`).join('');
+  $('#promptsModal').classList.add('open');
+}
+async function activatePrompt(v) {
+  await api('/api/prompts/activate', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ version: v }) });
+  openPrompts();
+}
+function editPrompt(text) {
+  $('#promptsModal').classList.remove('open');
+  $('#edText').value = text;
+  $('#editModal').classList.add('open');
+}
+$('#edSave').onclick = async () => {
+  const t = $('#edText').value.trim();
+  if (!t) return;
+  await api('/api/prompts', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ text: t }) });
+  $('#editModal').classList.remove('open');
+  openPrompts();
+};
+$('#edCancel').onclick = () => $('#editModal').classList.remove('open');
+$('#promptsBtn').onclick = openPrompts;
+$('#pmClose').onclick = () => $('#promptsModal').classList.remove('open');
+
+loadPile('stock_candidate');
+</script>
+</body></html>

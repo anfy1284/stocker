@@ -11,9 +11,12 @@ import argparse
 import logging
 import sys
 
+import anthropic
+
 from .classifier import run_classification
 from .config import Config, load_config
-from .db import init_db
+from .db import get_connection, init_db
+from .improver import improve_prompt
 from .intake import run_intake
 from .logging_setup import setup_logging
 
@@ -63,6 +66,31 @@ def cmd_classify(cfg: Config) -> int:
     return 0
 
 
+def cmd_improve_prompt(cfg: Config) -> int:
+    cfg.ensure_dirs()
+    init_db(cfg.db_path)
+    if not cfg.has_api_key:
+        log.error("ANTHROPIC_API_KEY не задан — доработка промпта невозможна.")
+        return 1
+    conn = get_connection(cfg.db_path)
+    try:
+        version = improve_prompt(conn, anthropic.Anthropic(api_key=cfg.anthropic_api_key))
+    finally:
+        conn.close()
+    if version is None:
+        log.info("Нет необработанных правок — промпт не менялся.")
+    else:
+        log.info("Промпт доработан → активна версия %d.", version)
+    return 0
+
+
+def cmd_web(cfg: Config) -> int:
+    from .webapp import run_server
+
+    run_server(cfg)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stocker",
@@ -73,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("config", help="Показать текущую конфигурацию.")
     sub.add_parser("intake", help="Принять новые файлы из папки-входящих.")
     sub.add_parser("classify", help="Классифицировать новые снимки (сток/не-сток).")
+    sub.add_parser("improve-prompt", help="Доработать промпт по накопленным правкам.")
+    sub.add_parser("web", help="Запустить веб-интерфейс ревью (локальный сервер).")
     return parser
 
 
@@ -90,4 +120,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_intake(cfg)
     if command == "classify":
         return cmd_classify(cfg)
+    if command == "improve-prompt":
+        return cmd_improve_prompt(cfg)
+    if command == "web":
+        return cmd_web(cfg)
     return cmd_init(cfg)
