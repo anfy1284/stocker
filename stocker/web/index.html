@@ -44,7 +44,9 @@
   #bar.ok { background: #dcfce7; color: #166534; }
   #bar.err { background: #fee2e2; color: #991b1b; }
   #bar.run { background: #dbeafe; color: #1e40af; }
+  #bar.neutral { background: #fff; border: 1px solid #e7e5e4; color: #1c1917; }
   #bar .btn { margin-left: 10px; }
+  #bar .btn.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
 
   /* блок метаданных в лайтбоксе */
   .meta-block { border-top: 1px solid #44403c; margin-top: 10px; padding-top: 10px; }
@@ -149,6 +151,15 @@
   <div class="modal-actions">
     <button class="btn" id="cmCancel">Отмена</button>
     <button class="btn" id="cmOk" style="background:#1c1917;color:#fff">Сохранить</button>
+  </div>
+</div></div>
+
+<div class="modal" id="confirmModal"><div class="modal-box">
+  <h3 id="cfTitle"></h3>
+  <p id="cfMsg" style="color:#57534e;font-size:14px;margin:0 0 12px;line-height:1.5"></p>
+  <div class="modal-actions">
+    <button class="btn" id="cfCancel">Отмена</button>
+    <button class="btn" id="cfOk" style="color:#fff">Подтвердить</button>
   </div>
 </div></div>
 
@@ -344,6 +355,24 @@ $('#cmOk').onclick = () => {
 };
 $('#cmCancel').onclick = () => { $('#commentModal').classList.remove('open'); cmResolve(null); };
 
+// диалог подтверждения (промис: true/false) — для необратимых массовых действий
+let cfResolve = null;
+function confirmAction(title, msg, okLabel = 'Подтвердить', okColor = '#dc2626') {
+  return new Promise(res => {
+    cfResolve = res;
+    $('#cfTitle').textContent = title;
+    $('#cfMsg').textContent = msg;
+    const ok = $('#cfOk'); ok.textContent = okLabel; ok.style.background = okColor;
+    $('#confirmModal').classList.add('open');
+  });
+}
+function _closeConfirm(val) {
+  $('#confirmModal').classList.remove('open');
+  if (cfResolve) { cfResolve(val); cfResolve = null; }
+}
+$('#cfOk').onclick = () => _closeConfirm(true);
+$('#cfCancel').onclick = () => _closeConfirm(false);
+
 // --- свайп (Tinder) ---
 let sx = 0, sdx = 0, swiping = false;
 const img = $('#lbImg');
@@ -424,6 +453,7 @@ function updateMetaButton() {
 }
 function renderBanner() {
   const bar = $('#bar');
+  if (pile === 'non_stock') { renderNonStockBanner(bar); return; }
   if (pile !== 'approved') { bar.style.display = 'none'; return; }
   const total = summary.approved || 0, pending = summary.meta_pending || 0, ready = total - pending;
   bar.style.display = 'block';
@@ -450,6 +480,27 @@ function renderBanner() {
       + `<button class="btn" id="barRun">Описать одобренные</button>`;
     $('#barRun').onclick = startMeta;
   }
+}
+function renderNonStockBanner(bar) {
+  const n = summary.non_stock || 0;
+  if (n === 0) { bar.style.display = 'none'; return; }
+  bar.style.display = 'block';
+  bar.className = 'neutral';
+  bar.innerHTML = `В «Не-Сток» ${n} фото — ИИ счёл их нестоковыми. `
+    + `<button class="btn danger" id="barRejectAll">🗑 Все в брак (${n})</button>`;
+  $('#barRejectAll').onclick = rejectAllNonStock;
+}
+async function rejectAllNonStock() {
+  const n = summary.non_stock || 0;
+  if (!n) return;
+  const ok = await confirmAction(
+    'Переместить всё в брак?',
+    `Все ${n} фото из «Не-Сток» будут перемещены в брак. Отобрать их в сток по одному после этого будет нельзя массово.`,
+    'В брак', '#dc2626');
+  if (!ok) return;
+  await fetch('/api/piles/non_stock/reject_all', { method: 'POST' });
+  await refreshCounts();
+  if (pile === 'non_stock') loadPile('non_stock');
 }
 function showProg(st) {
   $('#metaBtn').style.display = 'none';
@@ -495,6 +546,12 @@ $('#offerLater').onclick = () => $('#offerModal').classList.remove('open');
 
 // --- выгрузка на Shutterstock: кнопка в баннере / прогресс / коллекция ---
 async function startUpload() {
+  const n = (summary.approved || 0) - (summary.meta_pending || 0);
+  const ok = await confirmAction(
+    'Выгрузить на Shutterstock?',
+    `${n} фото будут залиты на твой аккаунт Shutterstock по FTPS. Действие необратимо — снятие с публикации делается только на сайте.`,
+    'Выгрузить', '#6d28d9');
+  if (!ok) return;
   const r = await fetch('/api/upload/run', { method: 'POST' });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));

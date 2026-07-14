@@ -265,6 +265,26 @@ def create_app(cfg: Config | None = None) -> Flask:
             conn.close()
         return jsonify({"ok": True, "status": new_status, "contradiction": contradiction})
 
+    @app.post("/api/piles/non_stock/reject_all")
+    def reject_all_non_stock():
+        """Массово переносит всю кучу «Не-Сток» в брак (пользователь согласен с ИИ).
+
+        Расхождения с ИИ здесь нет (ИИ отсеял, пользователь подтверждает), поэтому
+        фидбэк не пишем — только смена статуса.
+        """
+        conn = _conn()
+        try:
+            cur = conn.execute(
+                "UPDATE assets SET status = ? WHERE status = ?",
+                (STATUS_REJECTED, STATUS_NON_STOCK),
+            )
+            conn.commit()
+            count = cur.rowcount
+        finally:
+            conn.close()
+        log.info("Массовый перенос в брак: %d снимков из «Не-Сток»", count)
+        return jsonify({"ok": True, "count": count})
+
     @app.post("/api/metadata/run")
     def metadata_run():
         """Запускает фоновую генерацию метаданных для одобренных снимков."""
