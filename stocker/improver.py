@@ -15,7 +15,7 @@ import logging
 
 import anthropic
 
-from . import prompts
+from . import costs, prompts
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +130,8 @@ def improve_prompt(conn, client: anthropic.Anthropic) -> int | None:
     )
     if response.stop_reason == "refusal":
         raise RuntimeError("умная модель отклонила доработку промпта (refusal)")
+
+    costs.record(conn, IMPROVER_MODEL, "improve_prompt", None, response.usage)
 
     text = next(b.text for b in response.content if b.type == "text")
     result = json.loads(text)

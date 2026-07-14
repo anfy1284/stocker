@@ -17,6 +17,7 @@ from pathlib import Path
 
 import anthropic
 
+from . import costs
 from .config import Config
 from .db import (
     STATUS_NEW,
@@ -68,8 +69,8 @@ def _encode_image(path: Path) -> str:
 
 def _classify_image(
     client: anthropic.Anthropic, preview_path: Path, system_prompt: str
-) -> dict[str, object]:
-    """Один vision-запрос к Haiku; возвращает разобранный вердикт."""
+) -> tuple[dict[str, object], object]:
+    """Один vision-запрос к Haiku; возвращает (вердикт, usage для учёта расходов)."""
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
@@ -95,7 +96,7 @@ def _classify_image(
     if response.stop_reason == "refusal":
         raise RuntimeError("модель отклонила запрос (refusal)")
     text = next(b.text for b in response.content if b.type == "text")
-    return json.loads(text)
+    return json.loads(text), response.usage
 
 
 def _apply_verdict(conn, asset_id: int, verdict: dict[str, object]) -> None:
@@ -158,10 +159,11 @@ def run_classification(cfg: Config) -> dict[str, int]:
 
         for row in rows:
             try:
-                verdict = _classify_image(
+                verdict, usage = _classify_image(
                     client, Path(row["preview_path"]), system_prompt
                 )
                 _apply_verdict(conn, row["id"], verdict)
+                costs.record(conn, MODEL, "classify", row["id"], usage)
                 conn.commit()
                 if verdict["stock_worthy"]:
                     stats["stock"] += 1

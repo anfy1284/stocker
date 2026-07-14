@@ -123,12 +123,38 @@ def _migrate_v4_feedback(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX idx_feedback_processed ON feedback(processed)")
 
 
+def _migrate_v5_api_costs(conn: sqlite3.Connection) -> None:
+    """v5: учёт расходов на ИИ (``api_costs``) — основа финансовой аналитики.
+
+    Одна строка на каждый вызов модели (классификация, доработка промпта,
+    позже метаданные): модель, операция, токены и стоимость в USD.
+    """
+    conn.execute(
+        """
+        CREATE TABLE api_costs (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at            TEXT    NOT NULL,
+            model                 TEXT    NOT NULL,
+            operation             TEXT    NOT NULL,   -- classify | improve_prompt | metadata
+            asset_id              INTEGER,
+            input_tokens          INTEGER NOT NULL DEFAULT 0,
+            output_tokens         INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd              REAL    NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute("CREATE INDEX idx_api_costs_created ON api_costs(created_at)")
+
+
 # Порядковый список миграций; индекс+1 = целевая версия схемы.
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_assets,
     _migrate_v2_classification,
     _migrate_v3_prompts,
     _migrate_v4_feedback,
+    _migrate_v5_api_costs,
 ]
 
 # Текущая версия схемы = число применённых миграций.
