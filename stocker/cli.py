@@ -20,6 +20,7 @@ from .improver import improve_prompt
 from .intake import run_intake
 from .logging_setup import setup_logging
 from .metadata import run_metadata
+from .organize import run_organize, write_manifest
 from .upload import run_upload
 
 log = logging.getLogger("stocker")
@@ -122,6 +123,30 @@ def cmd_upload(cfg: Config, dry_run: bool) -> int:
     return 0
 
 
+def cmd_organize(cfg: Config) -> int:
+    cfg.ensure_dirs()
+    init_db(cfg.db_path)
+    stats = run_organize(cfg)
+    log.info(
+        "Раскладка: перемещено %(moved)d, на месте %(in_place)d, не удалось %(failed)d.",
+        stats,
+    )
+    if stats["failed"]:
+        log.warning(
+            "%d файлов не перемещены (заняты?) — повтори «stocker organize» позже.",
+            stats["failed"],
+        )
+    return 0
+
+
+def cmd_manifest(cfg: Config) -> int:
+    cfg.ensure_dirs()
+    init_db(cfg.db_path)
+    path = write_manifest(cfg)
+    log.info("Манифест известных хешей: %s", path)
+    return 0
+
+
 def cmd_web(cfg: Config) -> int:
     from .webapp import run_server
 
@@ -149,6 +174,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Только собрать CSV, без соединения и заливки (проверка формата).",
     )
+    sub.add_parser(
+        "organize", help="Разложить файлы по папкам согласно статусу (stock/approved/inbox)."
+    )
+    sub.add_parser(
+        "manifest", help="Обновить манифест известных хешей (для дедупа загрузчика)."
+    )
     sub.add_parser("web", help="Запустить веб-интерфейс ревью (локальный сервер).")
     return parser
 
@@ -173,6 +204,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_metadata(cfg)
     if command == "upload":
         return cmd_upload(cfg, dry_run=args.dry_run)
+    if command == "organize":
+        return cmd_organize(cfg)
+    if command == "manifest":
+        return cmd_manifest(cfg)
     if command == "web":
         return cmd_web(cfg)
     return cmd_init(cfg)

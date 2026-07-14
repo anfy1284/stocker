@@ -25,6 +25,7 @@ from datetime import datetime
 from ftplib import FTP_TLS
 from pathlib import Path
 
+from . import organize
 from .config import Config
 from .db import STATUS_DESCRIBED, STATUS_UPLOADED, get_connection
 
@@ -217,6 +218,8 @@ def run_upload(
                         "WHERE id = ?",
                         (STATUS_UPLOADED, r["upload_name"], now, r["id"]),
                     )
+                    # Залитый снимок возвращается в inbox (спецпапки ему больше не нужны).
+                    organize.relocate(conn, cfg, r["id"], STATUS_UPLOADED)
                     conn.commit()
                     stats["uploaded"] += 1
                     log.info(

@@ -18,7 +18,7 @@ from pathlib import Path
 import anthropic
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from . import improver, metadata, prompts, upload
+from . import improver, metadata, organize, prompts, upload
 from .config import Config, load_config
 from .db import (
     STATUS_APPROVED,
@@ -253,6 +253,8 @@ def create_app(cfg: Config | None = None) -> Flask:
             conn.execute(
                 "UPDATE assets SET status = ? WHERE id = ?", (new_status, asset_id)
             )
+            # Одобренные уезжают в approved/ (фотошоп перед выгрузкой), брак — в inbox.
+            organize.relocate(conn, cfg, asset_id, new_status)
             # Фидбэк — только при расхождении с ИИ (сигнал для доработки промпта).
             if contradiction and comment:
                 dec = (

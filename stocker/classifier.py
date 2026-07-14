@@ -17,7 +17,7 @@ from pathlib import Path
 
 import anthropic
 
-from . import costs
+from . import costs, organize
 from .config import Config
 from .db import (
     STATUS_NEW,
@@ -164,6 +164,13 @@ def run_classification(cfg: Config) -> dict[str, int]:
                 )
                 _apply_verdict(conn, row["id"], verdict)
                 costs.record(conn, MODEL, "classify", row["id"], usage)
+                # Сток-кандидаты уезжают в отдельную папку для отбора/фотошопа.
+                new_status = (
+                    STATUS_STOCK_CANDIDATE
+                    if verdict["stock_worthy"]
+                    else STATUS_NON_STOCK
+                )
+                organize.relocate(conn, cfg, row["id"], new_status)
                 conn.commit()
                 if verdict["stock_worthy"]:
                     stats["stock"] += 1

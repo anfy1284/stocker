@@ -15,6 +15,7 @@ from pathlib import Path
 
 from PIL import ExifTags, Image, ImageOps
 
+from . import organize
 from .config import Config
 from .db import STATUS_NEW, get_connection
 
@@ -101,11 +102,41 @@ def _scan(inbox_dir: Path) -> list[Path]:
     )
 
 
-def _hash_exists(conn, content_hash: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM assets WHERE content_hash = ? LIMIT 1", (content_hash,)
+def _asset_by_hash(conn, content_hash: str):
+    """Уже принятый снимок с таким содержимым (id, путь) — или None."""
+    return conn.execute(
+        "SELECT id, original_path FROM assets WHERE content_hash = ? LIMIT 1",
+        (content_hash,),
     ).fetchone()
-    return row is not None
+
+
+def _handle_known(conn, asset, path: Path) -> str:
+    """Реакция на файл, чей хеш уже в БД. Возвращает вид события для статистики.
+
+    Дедуп по содержимому, а не по расположению: если канонический файл снимка
+    существует в другом месте (снимок мог уехать в stock/approved), то этот —
+    повторная копия загрузчика, её удаляем. Если канонический потерян — усыновляем
+    эту копию как новый ``original_path`` (самолечение). Если это он и есть —
+    просто оставляем.
+    """
+    canonical = Path(asset["original_path"]) if asset["original_path"] else None
+    if canonical and canonical.resolve() == path.resolve():
+        return "duplicate"  # это и есть канонический файл — не трогаем
+    if canonical and canonical.exists():
+        try:
+            path.unlink()
+            log.info("Удалён повторный дубль (канонич. файл на месте): %s", path.name)
+            return "cleaned"
+        except OSError:
+            log.warning("Не удалось удалить повторный дубль: %s", path)
+            return "duplicate"
+    conn.execute(
+        "UPDATE assets SET original_path = ? WHERE id = ?",
+        (str(path.resolve()), asset["id"]),
+    )
+    conn.commit()
+    log.info("Канонический файл был потерян — усыновлена копия: %s", path.name)
+    return "repaired"
 
 
 def _process_file(path: Path, content_hash: str, previews_dir: Path) -> dict[str, object]:
@@ -140,16 +171,23 @@ def _insert(conn, record: dict[str, object]) -> None:
 
 def run_intake(cfg: Config) -> dict[str, int]:
     """Сканирует входящие и заводит новые JPEG в БД. Возвращает статистику."""
-    stats = {"scanned": 0, "added": 0, "duplicate": 0, "errors": 0}
+    stats = {
+        "scanned": 0,
+        "added": 0,
+        "duplicate": 0,
+        "cleaned": 0,
+        "repaired": 0,
+        "errors": 0,
+    }
     conn = get_connection(cfg.db_path)
     try:
         for path in _scan(cfg.inbox_dir):
             stats["scanned"] += 1
             try:
                 content_hash = _hash_file(path)
-                if _hash_exists(conn, content_hash):
-                    stats["duplicate"] += 1
-                    log.info("Дубль, пропуск: %s", path.name)
+                known = _asset_by_hash(conn, content_hash)
+                if known is not None:
+                    stats[_handle_known(conn, known, path)] += 1
                     continue
                 record = _process_file(path, content_hash, cfg.previews_dir)
                 _insert(conn, record)
@@ -162,9 +200,14 @@ def run_intake(cfg: Config) -> dict[str, int]:
     finally:
         conn.close()
 
+    # Обновляем манифест известных хешей — по нему будущий загрузчик не грузит
+    # повторно уже принятые исходники (где бы их файлы сейчас ни лежали).
+    organize.write_manifest(cfg)
+
     log.info(
-        "Приём завершён: найдено %(scanned)d, добавлено %(added)d, "
-        "дублей %(duplicate)d, ошибок %(errors)d",
+        "Приём завершён: найдено %(scanned)d, добавлено %(added)d, дублей "
+        "%(duplicate)d, вычищено копий %(cleaned)d, восстановлено %(repaired)d, "
+        "ошибок %(errors)d",
         stats,
     )
     return stats
