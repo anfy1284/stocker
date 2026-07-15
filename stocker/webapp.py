@@ -49,6 +49,8 @@ PILES = (
 
 # Суточный интервал авто-разбора (приём + классификация новых файлов).
 _AUTO_INTERVAL = 24 * 3600
+# Частый фоновый приём — чтобы новые файлы из inbox быстро попадали в «Нераспределённые».
+_INTAKE_INTERVAL = 60
 
 # Статусы «одобренной» кучи: одобрены пользователем на триаже. Внутри —
 # ``described`` (метаданные готовы) и ``approved`` (метаданные ещё не сгенерированы).
@@ -125,8 +127,23 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
                     log.info("Авто-разбор: запущена суточная проверка новых файлов.")
             time.sleep(_AUTO_INTERVAL)
 
+    def _intake_watch():
+        """Часто принимает новые файлы из inbox, чтобы они быстро появлялись в
+        «Нераспределённых» (без разбора — тот по кнопке/раз в сутки). Приём дешёвый
+        и не ходит в ИИ. Пропускаем, если уже идёт разбор (он сам сделает приём)."""
+        while True:
+            time.sleep(_INTAKE_INTERVAL)
+            try:
+                with cls_lock:
+                    busy = cls_state["running"]
+                if not busy:
+                    intake.run_intake(cfg)
+            except Exception:  # noqa: BLE001 — фоновая задача, не роняем сервер
+                log.exception("Ошибка фонового приёма новых файлов")
+
     if enable_scheduler:
         threading.Thread(target=_scheduler, daemon=True).start()
+        threading.Thread(target=_intake_watch, daemon=True).start()
 
     # --- Фоновый процесс генерации метаданных ------------------------------
     # Один процесс на сервер: пользователь жмёт кнопку в шапке, генерация идёт
@@ -391,6 +408,13 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
             state = dict(cls_state)
         state["has_key"] = cfg.has_api_key
         return jsonify(state)
+
+    @app.post("/api/intake/run")
+    def intake_run():
+        """Принудительный приём: сразу подхватить новые файлы из inbox в
+        «Нераспределённые» (без разбора). ИИ не задействован."""
+        added = intake.run_intake(cfg)["added"]
+        return jsonify({"ok": True, "added": added})
 
     @app.post("/api/metadata/run")
     def metadata_run():

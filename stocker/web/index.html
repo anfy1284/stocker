@@ -513,9 +513,18 @@ function renderNewBanner(bar) {
   bar.className = 'neutral';
   bar.innerHTML = (n
     ? `Новых снимков: ${n} — ждут ИИ-разбора. `
-    : `Новых снимков нет. Проверить inbox и разобрать: `)
+    : `Новых снимков нет. `)
+    + `<button class="btn" id="barRefresh">🔄 Проверить inbox</button>`
     + `<button class="btn go" id="barClassify">✨ ${n ? 'Распределить (' + n + ')' : 'Запустить разбор'}</button>`;
+  $('#barRefresh').onclick = refreshInbox;
   $('#barClassify').onclick = startClassify;
+}
+async function refreshInbox() {
+  const btn = $('#barRefresh');
+  if (btn) { btn.disabled = true; btn.textContent = '🔄 Проверяю…'; }
+  await fetch('/api/intake/run', { method: 'POST' }).catch(() => {});
+  await refreshCounts();                 // перерисует баннер (кнопка вернётся)
+  if (pile === 'new') loadPile('new');   // показать подхваченные карточки
 }
 async function startClassify() {
   const r = await fetch('/api/classify/run', { method: 'POST' });
@@ -660,6 +669,17 @@ $('#udClose').onclick = () => $('#uploadDoneModal').classList.remove('open');
 api('/api/metadata/status').then(st => { if (st.running) pollMeta(); });
 api('/api/upload/status').then(st => { if (st.running) { upStatus = st; pollUpload(); } });
 api('/api/classify/status').then(st => { if (st.running) { clsStatus = st; pollClassify(); } });
+
+// Сервер каждую минуту принимает новые файлы из inbox — периодически обновляем
+// счётчики, а если открыта группа «Нераспределённые» и их число изменилось —
+// подтягиваем свежие карточки. Не мешаем активным процессам и лайтбоксу.
+setInterval(async () => {
+  if (clsPoll || upPoll || metaPoll) return;
+  if ($('#lb').classList.contains('open')) return;
+  const prevNew = summary.new || 0;
+  await refreshCounts();
+  if (pile === 'new' && (summary.new || 0) !== prevNew) loadPile('new');
+}, 20000);
 
 loadPile('new');
 </script>
