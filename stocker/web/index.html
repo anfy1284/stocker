@@ -81,11 +81,15 @@
   .lb-reset[hidden] { display: none; }
   /* подпись под картинкой: ‹ слева, счётчик по центру, › справа (индикаторы, не кнопки) */
   .lb-caption { display: flex; align-items: center; justify-content: space-between;
-                padding: 9px 20px; color: #a8a29e; font-size: 14px; user-select: none; flex: 0 0 auto; }
+                padding: 9px 20px; color: #a8a29e; font-size: 14px; user-select: none;
+                flex: 0 0 auto; touch-action: none; }
   .lb-caption .cap-arrow { font-size: 24px; line-height: 1; color: #d6d3d1; width: 30px; }
   .lb-caption .cap-arrow.r { text-align: right; }
   .lb-caption .cap-count { font-variant-numeric: tabular-nums; letter-spacing: .5px; }
-  .lb-panel { width: 360px; background: #1c1917; color: #e7e5e4; display: flex; flex-direction: column; }
+  /* touch-action: pan-y — по панели тянем описание вертикально нативно, а
+     горизонтальный свайп ловит наш обработчик и листает коллекцию */
+  .lb-panel { width: 360px; background: #1c1917; color: #e7e5e4; display: flex;
+              flex-direction: column; touch-action: pan-y; transition: max-height .28s ease; }
   .lb-info { flex: 1; padding: 16px; overflow-y: auto; }
   .lb-info .cat { color: #a8a29e; margin-left: 6px; }
   .lb-info .reason { margin: 8px 0; font-size: 14px; line-height: 1.5; }
@@ -103,6 +107,9 @@
     .lb.open { flex-direction: column; }
     .lb-stage { flex: 1; min-height: 0; }
     .lb-panel { width: 100%; max-height: 45vh; }
+    /* режим «на весь экран» (свайп вниз): прячем описание, кнопки и подпись */
+    .lb.immersive .lb-panel { max-height: 0; overflow: hidden; }
+    .lb.immersive .lb-caption { display: none; }
   }
 
   /* модалки */
@@ -326,7 +333,7 @@ function metaBlock(a) {
   }
   return '';
 }
-function openLb(i) { idx = i; renderLb(); $('#lb').classList.add('open'); }
+function openLb(i) { setImmersive(false); idx = i; renderLb(); $('#lb').classList.add('open'); }
 function closeLb() { $('#lb').classList.remove('open'); }
 // панель справа: бейдж, категория, флаги, причина, метаданные, комментарии
 function renderInfoPanel(a) {
@@ -532,29 +539,39 @@ async function slide(dir) {
   animating = false;
 }
 
-// --- жесты касания: 1 палец — свайп ленты, 2 пальца — пинч-зум ---
+// --- жесты касания (весь лайтбокс, чтобы свайп ловился и на панели описания):
+//   1 палец по горизонтали  — листаем ленту (откуда угодно, не только по фото);
+//   1 палец по вертикали на фото (моб.) — вниз развернуть на весь экран, вверх вернуть;
+//   2 пальца — пинч-зум.
+const lb = $('#lb');
+const mobileMQ = matchMedia('(max-width: 760px), (pointer: coarse)');
 function touchDist(t) { return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
 function touchMid(t) {
   const vr = viewport.getBoundingClientRect();
   return { x: (t[0].clientX + t[1].clientX) / 2 - (vr.left + vr.width / 2),
            y: (t[0].clientY + t[1].clientY) / 2 - (vr.top + vr.height / 2) };
 }
-let zooming = false, pinchDist0 = 0, pinchMid0 = { x: 0, y: 0 };
+// «на весь экран»: прячем описание, кнопки и подпись — фото занимает всё (моб.)
+function setImmersive(on) { immersive = on; lb.classList.toggle('immersive', on); }
 
-track.addEventListener('touchstart', e => {
+let zooming = false, pinchDist0 = 0, pinchMid0 = { x: 0, y: 0 };
+let sy = 0, sdy = 0, axis = null, onImage = false, immersive = false;
+
+lb.addEventListener('touchstart', e => {
   if (e.touches.length === 2) {           // пинч — начинаем зум
-    zooming = true; swiping = false;
+    zooming = true; swiping = false; axis = 'pinch';
     captureBase();
     pinchDist0 = touchDist(e.touches);
     pinchMid0 = touchMid(e.touches);
     return;
   }
-  if (animating || items.length < 2) return;
-  sx = e.touches[0].clientX; sdx = 0; swiping = true;
-  track.style.transition = 'none';        // тянем ленту без задержки
+  if (animating) return;
+  const t = e.touches[0];
+  sx = t.clientX; sy = t.clientY; sdx = 0; sdy = 0; axis = null; swiping = false;
+  onImage = !!e.target.closest('#lbViewport, .lb-caption');   // жест начат на фото/подписи
 }, { passive: true });
-track.addEventListener('touchmove', e => {
-  if (zooming && e.touches.length === 2) {
+lb.addEventListener('touchmove', e => {
+  if (zooming && e.touches.length === 2) {   // живой пинч-зум
     e.preventDefault();
     const s = Math.min(MAXZOOM, Math.max(1, touchDist(e.touches) / pinchDist0));
     const m = touchMid(e.touches);
@@ -564,24 +581,41 @@ track.addEventListener('touchmove', e => {
     applyZoom(false);
     return;
   }
-  if (!swiping) return;
-  sdx = e.touches[0].clientX - sx;
-  track.style.transform = `translateX(${sdx}px)`;
+  if (zooming || axis === 'dead') return;
+  const t = e.touches[0];
+  sdx = t.clientX - sx; sdy = t.clientY - sy;
+  if (!axis) {                            // ось жеста определяем после небольшого сдвига
+    if (Math.abs(sdx) < 10 && Math.abs(sdy) < 10) return;
+    if (Math.abs(sdx) >= Math.abs(sdy)) {          // горизонталь — листаем (откуда угодно)
+      if (items.length < 2) { axis = 'dead'; return; }
+      axis = 'h'; swiping = true; track.style.transition = 'none';
+    } else if (mobileMQ.matches && onImage) {      // вертикаль по фото (моб.) — разворот/сворачивание
+      axis = 'v';
+    } else { axis = 'dead'; return; }              // вертикаль по панели — оставляем нативный скролл
+  }
+  if (axis === 'h') { track.style.transform = `translateX(${sdx}px)`; e.preventDefault(); }
+  else if (axis === 'v') { e.preventDefault(); }
 }, { passive: false });
-track.addEventListener('touchend', e => {
+lb.addEventListener('touchend', e => {
   if (zooming) {                          // отпустили пальцы — плавно вернуть 1× (как в Instagram)
-    if (e.touches.length === 0) { zooming = false; resetZoom(true); }
+    if (e.touches.length === 0) { zooming = false; axis = null; resetZoom(true); }
     return;
   }
-  if (!swiping) return;
-  swiping = false;
-  const threshold = Math.min(80, vpW() * 0.18);
-  if (sdx <= -threshold) slide(1);        // палец влево → следующий кадр
-  else if (sdx >= threshold) slide(-1);   // палец вправо → предыдущий кадр
-  else {                                   // короткий свайп — мягко вернуть на место
-    track.style.transition = `transform .2s ${EASE}`;
-    track.style.transform = 'translateX(0)';
+  if (axis === 'h') {
+    swiping = false;
+    const threshold = Math.min(80, vpW() * 0.18);
+    if (sdx <= -threshold) slide(1);      // палец влево → следующий кадр
+    else if (sdx >= threshold) slide(-1); // палец вправо → предыдущий кадр
+    else {                                 // короткий свайп — мягко вернуть на место
+      track.style.transition = `transform .2s ${EASE}`;
+      track.style.transform = 'translateX(0)';
+    }
+  } else if (axis === 'v') {
+    const vth = 60;
+    if (!immersive && sdy >= vth) setImmersive(true);        // свайп вниз → фото на весь экран
+    else if (immersive && sdy <= -vth) setImmersive(false);  // свайп вверх → вернуть панель
   }
+  axis = null;
 });
 
 $('#btnApprove').onclick = () => decide('approve');
