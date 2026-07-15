@@ -473,7 +473,7 @@ function renderBanner() {
   if (pile !== 'approved') { bar.style.display = 'none'; return; }
   const total = summary.approved || 0, pending = summary.meta_pending || 0, ready = total - pending;
   bar.style.display = 'block';
-  if (upPoll && upStatus) {                       // идёт выгрузка на сток
+  if (upStatus && upStatus.running) {             // идёт выгрузка на сток
     const seen = upStatus.uploaded + upStatus.errors, t = upStatus.total;
     const pct = t ? Math.round(seen / t * 100) : 0;
     bar.className = 'run';
@@ -667,11 +667,16 @@ function pollUpload() {
 }
 $('#udClose').onclick = () => $('#uploadDoneModal').classList.remove('open');
 
-// при загрузке: если генерация/выгрузка/разбор уже идёт (перезагрузили страницу) — подхватить
+// ВАЖНО: loadPile() в начале зовёт window.stop() (обрывает загрузки прошлой кучи),
+// а это аннулирует и любые сетевые запросы, запущенные до него. Поэтому подхват
+// статусов запускаем ПОСЛЕ loadPile — иначе прогресс-бары не переживают обновление.
+loadPile('new');
+
+// Если генерация/выгрузка/разбор уже идёт (перезагрузили страницу) — показать снова.
 api('/api/metadata/status').then(st => { if (st.running) pollMeta(); });
-api('/api/upload/status').then(st => { if (st.running) { upStatus = st; pollUpload(); } });
+api('/api/upload/status').then(st => { upStatus = st; if (st.running) pollUpload(); });
 api('/api/classify/status').then(st => {
-  clsStatus = st;                                  // прогресс переживает обновление страницы
+  clsStatus = st;
   if (st.running) pollClassify();
   else if (pile === 'new') renderBanner();
 });
@@ -686,7 +691,5 @@ setInterval(async () => {
   await refreshCounts();
   if (pile === 'new' && (summary.new || 0) !== prevNew) loadPile('new');
 }, 20000);
-
-loadPile('new');
 </script>
 </body></html>
