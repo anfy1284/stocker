@@ -5,7 +5,8 @@
 
   * ``stock_candidate``            → ``stock_dir``   (изолированно отбирать/фотошопить)
   * ``approved`` / ``described``   → ``approved_dir`` (фотошопить перед выгрузкой)
-  * всё остальное                  → ``inbox_dir``    (new/non_stock/rejected/uploaded)
+  * ``uploaded``                   → ``done_dir``     (отработанные — можно удалять)
+  * всё остальное                  → ``inbox_dir``    (new/non_stock/rejected)
 
 Перемещение вызывается на переходах статуса (классификатор, ревью, выгрузка).
 Оно устойчиво: если файл занят (открыт в Photoshop) и переместить не вышло —
@@ -28,6 +29,7 @@ from .db import (
     STATUS_APPROVED,
     STATUS_DESCRIBED,
     STATUS_STOCK_CANDIDATE,
+    STATUS_UPLOADED,
     get_connection,
 )
 
@@ -43,7 +45,9 @@ def folder_for_status(cfg: Config, status: str) -> Path:
         return cfg.stock_dir
     if status in (STATUS_APPROVED, STATUS_DESCRIBED):
         return cfg.approved_dir
-    return cfg.inbox_dir  # new, non_stock, rejected, uploaded
+    if status == STATUS_UPLOADED:
+        return cfg.done_dir  # отработанные — в отдельную папку, чтобы потом удалить
+    return cfg.inbox_dir  # new, non_stock, rejected
 
 
 def _is_placed(src: Path, target: Path, is_inbox: bool) -> bool:

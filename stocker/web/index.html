@@ -253,7 +253,7 @@ async function loadPile(s) {
 function cardCaption(a) {
   // В «Одобрено»/«Выгружено» показываем статус: фиолетовый «ВЫГРУЖЕНО»,
   // зелёный «ОПИСАНО» + начало описания, либо красный «БЕЗ МЕТА».
-  if (a.status === 'uploaded') return `<span class="badge uploaded">ВЫГРУЖЕНО</span> ${esc(a.meta ? a.meta.description : '')}`;
+  if (a.status === 'uploaded') return `<span class="badge uploaded">ВЫГРУЖЕНО</span> ${a.file_deleted ? '<span class="badge nometa">УДАЛЁН</span> ' : ''}${esc(a.meta ? a.meta.description : '')}`;
   if (a.meta) return `<span class="badge described">ОПИСАНО</span> ${esc(a.meta.description)}`;
   if (a.status === 'approved') return `<span class="badge nometa">БЕЗ МЕТА</span>`;
   const [cls, txt] = badgeFor(a.status);
@@ -281,8 +281,12 @@ function metaRows(m) {
 }
 function metaBlock(a) {
   if (a.upload) {
-    return `<div class="meta-block"><div class="mtitle ok">✓ Выгружено на Shutterstock</div>
-      <div class="mrow"><b>Файл:</b> ${esc(a.upload.name)}</div>
+    const del = a.file_deleted
+      ? `<div class="mtitle err">✗ Оригинал удалён из папки «отработанные» — запись и превью сохранены в истории.</div>`
+      : '';
+    return `<div class="meta-block"><div class="mtitle ok">✓ Выгружено на Shutterstock</div>`
+      + del
+      + `<div class="mrow"><b>Файл:</b> ${esc(a.upload.name)}</div>
       <div class="mrow"><b>Когда:</b> ${a.upload.at ? fmtDate(a.upload.at) : ''}</div>`
       + (a.meta ? metaRows(a.meta) : '') + `</div>`;
   }

@@ -182,6 +182,16 @@ def _migrate_v7_upload(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
 
 
+def _migrate_v8_file_deleted(conn: sqlite3.Connection) -> None:
+    """v8: флаг ``file_deleted`` — оригинал отработанного снимка удалён извне.
+
+    Отработанные (uploaded) лежат в отдельной папке, чтобы их потом удалять. Если
+    файл пропал, запись и превью остаются, а флаг помечает отсутствие оригинала —
+    интерфейс покажет «файл удалён», а не сломается.
+    """
+    conn.execute("ALTER TABLE assets ADD COLUMN file_deleted INTEGER NOT NULL DEFAULT 0")
+
+
 # Порядковый список миграций; индекс+1 = целевая версия схемы.
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_assets,
@@ -191,6 +201,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v5_api_costs,
     _migrate_v6_metadata,
     _migrate_v7_upload,
+    _migrate_v8_file_deleted,
 ]
 
 # Текущая версия схемы = число применённых миграций.

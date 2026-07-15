@@ -176,15 +176,29 @@ def create_app(cfg: Config | None = None) -> Flask:
         conn = _conn()
         try:
             rows = conn.execute(
-                "SELECT id, preview_path, status, category, classification_reason, "
-                "has_logo, has_brand, has_text, meta_description, meta_keywords, "
-                "meta_category1, meta_category2, meta_generated_at, "
-                "upload_name, uploaded_at "
+                "SELECT id, original_path, preview_path, status, category, "
+                "classification_reason, has_logo, has_brand, has_text, "
+                "meta_description, meta_keywords, meta_category1, meta_category2, "
+                "meta_generated_at, upload_name, uploaded_at, file_deleted "
                 f"FROM assets WHERE status IN ({placeholders}) ORDER BY id",
                 wanted,
             ).fetchall()
             out = []
             for r in rows:
+                # Отработанные пользователь удаляет из папки done — ловим пропажу
+                # оригинала лениво (запись и превью остаются, флаг проставляется).
+                file_deleted = bool(r["file_deleted"])
+                if (
+                    r["status"] == STATUS_UPLOADED
+                    and not file_deleted
+                    and r["original_path"]
+                    and not Path(r["original_path"]).exists()
+                ):
+                    conn.execute(
+                        "UPDATE assets SET file_deleted = 1 WHERE id = ?", (r["id"],)
+                    )
+                    conn.commit()
+                    file_deleted = True
                 fb = conn.execute(
                     "SELECT comment, created_at FROM feedback "
                     "WHERE asset_id = ? AND comment IS NOT NULL ORDER BY id",
@@ -224,6 +238,7 @@ def create_app(cfg: Config | None = None) -> Flask:
                             if r["upload_name"]
                             else None
                         ),
+                        "file_deleted": file_deleted,
                     }
                 )
         finally:

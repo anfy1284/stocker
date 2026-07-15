@@ -26,8 +26,11 @@ def _u(usage, name: str) -> int:
     return int(getattr(usage, name, 0) or 0)
 
 
-def compute_cost(model: str, usage) -> float:
-    """Стоимость вызова в USD по usage ответа Anthropic."""
+def compute_cost(model: str, usage, discount: float = 1.0) -> float:
+    """Стоимость вызова в USD по usage ответа Anthropic.
+
+    ``discount`` умножает итог: 0.5 для Batch API (пакетный разбор вдвое дешевле).
+    """
     rates = PRICING.get(model)
     if rates is None:
         log.warning("Нет цены для модели %s — считаю стоимость 0", model)
@@ -37,7 +40,7 @@ def compute_cost(model: str, usage) -> float:
     out = _u(usage, "output_tokens")
     cache_read = _u(usage, "cache_read_input_tokens")
     cache_write = _u(usage, "cache_creation_input_tokens")
-    return (
+    return discount * (
         inp * in_rate
         + out * out_rate
         + cache_read * in_rate * 0.1
@@ -45,9 +48,11 @@ def compute_cost(model: str, usage) -> float:
     ) / _MILLION
 
 
-def record(conn, model: str, operation: str, asset_id: int | None, usage) -> float:
+def record(
+    conn, model: str, operation: str, asset_id: int | None, usage, discount: float = 1.0
+) -> float:
     """Пишет строку расхода в ``api_costs``; возвращает стоимость вызова."""
-    cost = compute_cost(model, usage)
+    cost = compute_cost(model, usage, discount)
     conn.execute(
         "INSERT INTO api_costs (created_at, model, operation, asset_id, "
         "input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, "
