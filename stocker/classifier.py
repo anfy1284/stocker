@@ -47,6 +47,9 @@ BATCH_DISCOUNT = 0.5
 CLASSIFY_MAX_SIDE = 512
 CLASSIFY_QUALITY = 70
 _POLL_INTERVAL = 8  # секунд между опросами статуса батча
+# Сколько подряд неудачных опросов терпим, прежде чем сдаться. Один сетевой сбой
+# не должен ронять разбор и сиротить уже запущенный батч (он живёт до 24 ч).
+_MAX_POLL_ERRORS = 60  # ~8 минут подряд недоступной сети
 
 # Системный промпт версионируется и хранится в БД (см. prompts.py); он больше
 # не константа. Здесь — только неизменная реплика пользователя к каждому кадру.
@@ -215,8 +218,23 @@ def _run_batch(client, conn, cfg, rows, system_prompt, stats, report) -> None:
     log.info("Батч классификации создан: %s (%d снимков)", batch.id, len(requests))
 
     # Опрос до завершения. Прогресс — по счётчикам обработанных батчем запросов.
+    # Временный сетевой сбой опроса терпим и повторяем: иначе один разрыв связи
+    # уронил бы разбор и осиротил уже запущенный (и оплачиваемый) батч.
+    poll_errors = 0
     while True:
-        info = client.messages.batches.retrieve(batch.id)
+        try:
+            info = client.messages.batches.retrieve(batch.id)
+        except Exception as exc:  # noqa: BLE001 — сеть/5xx: повторяем, не падаем
+            poll_errors += 1
+            log.warning(
+                "Батч %s: сбой опроса %d/%d, повтор через %d c: %s",
+                batch.id, poll_errors, _MAX_POLL_ERRORS, _POLL_INTERVAL, exc,
+            )
+            if poll_errors >= _MAX_POLL_ERRORS:
+                raise
+            time.sleep(_POLL_INTERVAL)
+            continue
+        poll_errors = 0
         if info.processing_status == "ended":
             break
         counts = info.request_counts
