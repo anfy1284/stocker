@@ -72,6 +72,7 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
     cls_lock = threading.Lock()
     cls_state = {
         "running": False,
+        "batch": False,  # True = пакетный (Batch API, долго); False = синхронный
         "phase": None,   # intake | classify | None
         "added": 0,      # принято новых файлов на этапе intake
         "total": 0,      # снимков в разборе
@@ -82,7 +83,7 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
         "error": None,   # фатальная ошибка (нет ключа, сбой батча)
     }
 
-    def _classify_worker():
+    def _classify_worker(use_batch: bool):
         try:
             with cls_lock:
                 cls_state["phase"] = "intake"
@@ -97,7 +98,7 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
                         non_stock=s["non_stock"], errors=s["errors"],
                     )
 
-            classifier.run_classification(cfg, on_progress=on_progress)
+            classifier.run_classification(cfg, on_progress=on_progress, use_batch=use_batch)
         except Exception as exc:  # noqa: BLE001 — показываем причину пользователю
             log.exception("Фатальная ошибка авто-разбора")
             with cls_lock:
@@ -106,16 +107,22 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
             with cls_lock:
                 cls_state.update(running=False, phase=None)
 
-    def _start_classify() -> bool:
-        """Запускает разбор, если он ещё не идёт. Возвращает, стартовал ли."""
+    def _start_classify(use_batch: bool) -> bool:
+        """Запускает разбор, если он ещё не идёт. Возвращает, стартовал ли.
+
+        ``use_batch=False`` — синхронно (кнопка, быстрый отклик); ``True`` —
+        пакетно через Batch API (суточный авто-разбор, вдвое дешевле).
+        """
         with cls_lock:
             if cls_state["running"]:
                 return False
             cls_state.update(
-                running=True, phase=None, added=0, total=0, done=0,
+                running=True, batch=use_batch, phase=None, added=0, total=0, done=0,
                 stock=0, non_stock=0, errors=0, error=None,
             )
-        threading.Thread(target=_classify_worker, daemon=True).start()
+        threading.Thread(
+            target=_classify_worker, args=(use_batch,), daemon=True
+        ).start()
         return True
 
     def _scheduler():
@@ -123,7 +130,8 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
         time.sleep(5)  # дать серверу подняться
         while True:
             if cfg.has_api_key:
-                if _start_classify():
+                # Суточный разбор — пакетно (дёшево, скорость не важна).
+                if _start_classify(use_batch=True):
                     log.info("Авто-разбор: запущена суточная проверка новых файлов.")
             time.sleep(_AUTO_INTERVAL)
 
@@ -211,7 +219,10 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
 
     @app.get("/")
     def index():
-        return send_file(WEB_DIR / "index.html")
+        # Без кэша: после обновления кода браузер всегда берёт свежий интерфейс.
+        resp = send_file(WEB_DIR / "index.html")
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
 
     @app.get("/previews/<path:name>")
     def preview(name: str):
@@ -394,10 +405,12 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
 
     @app.post("/api/classify/run")
     def classify_run():
-        """Запускает фоновый разбор новых файлов (приём + пакетная классификация)."""
+        """Запускает разбор новых файлов. ?mode=batch — пакетно (дёшево, долго),
+        иначе синхронно (быстро)."""
         if not cfg.has_api_key:
             return jsonify({"ok": False, "error": "no_key"}), 400
-        if not _start_classify():
+        use_batch = request.args.get("mode") == "batch"
+        if not _start_classify(use_batch=use_batch):
             return jsonify({"ok": False, "running": True}), 409
         return jsonify({"ok": True})
 

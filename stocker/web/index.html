@@ -499,25 +499,26 @@ function renderBanner() {
 }
 function renderNewBanner(bar) {
   bar.style.display = 'block';
-  if (clsPoll && clsStatus) {                    // идёт разбор
+  if (clsStatus && clsStatus.running) {          // идёт разбор — показываем всегда
     bar.className = 'run';
     if (clsStatus.phase === 'intake') { bar.textContent = 'Ищу новые файлы в inbox…'; return; }
     const seen = clsStatus.done, t = clsStatus.total;
     const pct = t ? Math.round(seen / t * 100) : 0;
+    const note = clsStatus.batch ? ' · пакетом, может занять минуты (можно закрыть страницу)' : '';
     bar.innerHTML = `Распределяю: ${t ? seen + '/' + t : 'подготовка…'}`
-      + (clsStatus.errors ? ` · ошибок ${clsStatus.errors}` : '')
+      + (clsStatus.errors ? ` · ошибок ${clsStatus.errors}` : '') + note
       + `<span class="barbar"><span style="width:${pct}%"></span></span>`;
     return;
   }
   const n = summary.new || 0;
   bar.className = 'neutral';
-  bar.innerHTML = (n
-    ? `Новых снимков: ${n} — ждут ИИ-разбора. `
-    : `Новых снимков нет. `)
+  bar.innerHTML = (n ? `Новых снимков: ${n}. ` : `Новых снимков нет. `)
     + `<button class="btn" id="barRefresh">🔄 Проверить inbox</button>`
-    + `<button class="btn go" id="barClassify">✨ ${n ? 'Распределить (' + n + ')' : 'Запустить разбор'}</button>`;
+    + `<button class="btn go" id="barFast">⚡ Распределить быстро${n ? ' (' + n + ')' : ''}</button>`
+    + `<button class="btn" id="barCheap">💸 Дешевле (пакетом)</button>`;
   $('#barRefresh').onclick = refreshInbox;
-  $('#barClassify').onclick = startClassify;
+  $('#barFast').onclick = () => startClassify('fast');
+  $('#barCheap').onclick = () => startClassify('batch');
 }
 async function refreshInbox() {
   const btn = $('#barRefresh');
@@ -526,14 +527,15 @@ async function refreshInbox() {
   await refreshCounts();                 // перерисует баннер (кнопка вернётся)
   if (pile === 'new') loadPile('new');   // показать подхваченные карточки
 }
-async function startClassify() {
-  const r = await fetch('/api/classify/run', { method: 'POST' });
+async function startClassify(mode) {
+  const r = await fetch('/api/classify/run?mode=' + mode, { method: 'POST' });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
     if (j.error === 'no_key') { alert('ANTHROPIC_API_KEY не задан в .env — разбор невозможен.'); return; }
     if (r.status !== 409) { alert('Не удалось запустить разбор.'); return; }
   }
-  clsStatus = { running: true, phase: 'intake', total: 0, done: 0, errors: 0 };
+  clsStatus = { running: true, batch: mode === 'batch', phase: 'intake', total: 0, done: 0, errors: 0 };
+  if (pile === 'new') renderBanner();    // мгновенно показать, что пошло
   pollClassify();
 }
 function pollClassify() {
@@ -668,7 +670,11 @@ $('#udClose').onclick = () => $('#uploadDoneModal').classList.remove('open');
 // при загрузке: если генерация/выгрузка/разбор уже идёт (перезагрузили страницу) — подхватить
 api('/api/metadata/status').then(st => { if (st.running) pollMeta(); });
 api('/api/upload/status').then(st => { if (st.running) { upStatus = st; pollUpload(); } });
-api('/api/classify/status').then(st => { if (st.running) { clsStatus = st; pollClassify(); } });
+api('/api/classify/status').then(st => {
+  clsStatus = st;                                  // прогресс переживает обновление страницы
+  if (st.running) pollClassify();
+  else if (pile === 'new') renderBanner();
+});
 
 // Сервер каждую минуту принимает новые файлы из inbox — периодически обновляем
 // счётчики, а если открыта группа «Нераспределённые» и их число изменилось —

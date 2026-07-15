@@ -87,6 +87,29 @@ def _small_image_b64(preview_path: Path) -> str:
     return base64.standard_b64encode(buf.getvalue()).decode("ascii")
 
 
+def _image_messages(preview_path: Path) -> list[dict]:
+    """Сообщение пользователя: уменьшенная картинка + реплика (общее для sync/batch)."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": _small_image_b64(preview_path),
+                    },
+                },
+                {"type": "text", "text": USER_PROMPT},
+            ],
+        }
+    ]
+
+
+_OUTPUT_CONFIG = {"format": {"type": "json_schema", "schema": _VERDICT_SCHEMA}}
+
+
 def _build_request(asset_id: int, preview_path: Path, system_prompt: str) -> Request:
     """Одна строка батча: vision-запрос к Haiku по уменьшенной картинке."""
     return Request(
@@ -95,26 +118,20 @@ def _build_request(asset_id: int, preview_path: Path, system_prompt: str) -> Req
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": _small_image_b64(preview_path),
-                            },
-                        },
-                        {"type": "text", "text": USER_PROMPT},
-                    ],
-                }
-            ],
-            output_config={
-                "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA}
-            },
+            messages=_image_messages(preview_path),
+            output_config=_OUTPUT_CONFIG,
         ),
+    )
+
+
+def _classify_one(client: anthropic.Anthropic, preview_path: Path, system_prompt: str):
+    """Синхронный vision-запрос к Haiku по одному снимку (для интерактивной кнопки)."""
+    return client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=system_prompt,
+        messages=_image_messages(preview_path),
+        output_config=_OUTPUT_CONFIG,
     )
 
 
@@ -151,15 +168,16 @@ def _apply_verdict(conn, asset_id: int, verdict: dict[str, object]) -> None:
     )
 
 
-def _apply_result(conn, cfg: Config, asset_id: int, message, stats: dict) -> None:
+def _apply_result(
+    conn, cfg: Config, asset_id: int, message, stats: dict, discount: float
+) -> None:
     """Разбирает ответ модели по одному снимку: вердикт → БД → папка → расход."""
     if getattr(message, "stop_reason", None) == "refusal":
         raise RuntimeError("модель отклонила запрос (refusal)")
     text = next(b.text for b in message.content if b.type == "text")
     verdict = json.loads(text)
     _apply_verdict(conn, asset_id, verdict)
-    # Пакетный разбор вдвое дешевле — учитываем это в стоимости.
-    costs.record(conn, MODEL, "classify", asset_id, message.usage, discount=BATCH_DISCOUNT)
+    costs.record(conn, MODEL, "classify", asset_id, message.usage, discount=discount)
     new_status = (
         STATUS_STOCK_CANDIDATE if verdict["stock_worthy"] else STATUS_NON_STOCK
     )
@@ -171,14 +189,72 @@ def _apply_result(conn, cfg: Config, asset_id: int, message, stats: dict) -> Non
         stats["non_stock"] += 1
 
 
-def run_classification(
-    cfg: Config, on_progress: Callable[[dict], None] | None = None
-) -> dict[str, int]:
-    """Классифицирует все «новые» снимки пакетом через Batch API.
+def _run_sync(client, conn, cfg, rows, system_prompt, stats, report) -> None:
+    """Синхронный разбор по одному снимку — быстрый отклик для кнопки «Распределить»."""
+    for row in rows:
+        try:
+            resp = _classify_one(client, Path(row["preview_path"]), system_prompt)
+            _apply_result(conn, cfg, row["id"], resp, stats, discount=1.0)
+        except Exception:
+            stats["errors"] += 1
+            log.exception("Ошибка классификации снимка %d", row["id"])
+        stats["done"] += 1
+        report()
 
-    ``on_progress`` (если задан) вызывается с копией статистики (плюс ``done`` —
-    сколько снимков уже обработано) при отправке, во время опроса батча и после
-    применения результатов — веб-интерфейс двигает прогресс-бар.
+
+def _run_batch(client, conn, cfg, rows, system_prompt, stats, report) -> None:
+    """Пакетный разбор через Batch API — вдвое дешевле, но асинхронный (минуты).
+
+    Для массового авто-разбора архива, где скорость не важна, а цена важна.
+    """
+    requests = [
+        _build_request(row["id"], Path(row["preview_path"]), system_prompt)
+        for row in rows
+    ]
+    batch = client.messages.batches.create(requests=requests)
+    log.info("Батч классификации создан: %s (%d снимков)", batch.id, len(requests))
+
+    # Опрос до завершения. Прогресс — по счётчикам обработанных батчем запросов.
+    while True:
+        info = client.messages.batches.retrieve(batch.id)
+        if info.processing_status == "ended":
+            break
+        counts = info.request_counts
+        stats["done"] = (
+            counts.succeeded + counts.errored + counts.canceled + counts.expired
+        )
+        report()
+        time.sleep(_POLL_INTERVAL)
+
+    # Результаты приходят в произвольном порядке — раскладываем по custom_id.
+    stats["done"] = 0
+    for result in client.messages.batches.results(batch.id):
+        asset_id = int(result.custom_id)
+        try:
+            if result.result.type != "succeeded":
+                raise RuntimeError(f"результат батча: {result.result.type}")
+            _apply_result(
+                conn, cfg, asset_id, result.result.message, stats, discount=BATCH_DISCOUNT
+            )
+        except Exception:
+            stats["errors"] += 1
+            log.exception("Ошибка классификации снимка %d", asset_id)
+        stats["done"] += 1
+        report()
+
+
+def run_classification(
+    cfg: Config,
+    on_progress: Callable[[dict], None] | None = None,
+    use_batch: bool = True,
+) -> dict[str, int]:
+    """Классифицирует все «новые» снимки.
+
+    ``use_batch=True`` — через Batch API (вдвое дешевле, но асинхронно, минуты;
+    для массового авто-разбора). ``use_batch=False`` — синхронно по одному
+    (быстрый отклик для кнопки в интерфейсе). ``on_progress`` (если задан)
+    вызывается с копией статистики (``done`` — сколько уже обработано) — веб
+    двигает прогресс-бар.
     """
     if not cfg.has_api_key:
         raise RuntimeError(
@@ -211,38 +287,8 @@ def run_classification(
             log.info("Нет новых снимков для классификации.")
             return stats
 
-        requests = [
-            _build_request(row["id"], Path(row["preview_path"]), system_prompt)
-            for row in rows
-        ]
-        batch = client.messages.batches.create(requests=requests)
-        log.info("Батч классификации создан: %s (%d снимков)", batch.id, len(requests))
-
-        # Опрос до завершения. Прогресс — по счётчикам обработанных батчем запросов.
-        while True:
-            info = client.messages.batches.retrieve(batch.id)
-            if info.processing_status == "ended":
-                break
-            counts = info.request_counts
-            stats["done"] = (
-                counts.succeeded + counts.errored + counts.canceled + counts.expired
-            )
-            report()
-            time.sleep(_POLL_INTERVAL)
-
-        # Результаты приходят в произвольном порядке — раскладываем по custom_id.
-        stats["done"] = 0
-        for result in client.messages.batches.results(batch.id):
-            asset_id = int(result.custom_id)
-            try:
-                if result.result.type != "succeeded":
-                    raise RuntimeError(f"результат батча: {result.result.type}")
-                _apply_result(conn, cfg, asset_id, result.result.message, stats)
-            except Exception:
-                stats["errors"] += 1
-                log.exception("Ошибка классификации снимка %d", asset_id)
-            stats["done"] += 1
-            report()
+        runner = _run_batch if use_batch else _run_sync
+        runner(client, conn, cfg, rows, system_prompt, stats, report)
     finally:
         conn.close()
 
