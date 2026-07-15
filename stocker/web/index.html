@@ -69,9 +69,6 @@
   #lbPrev { left: 8px; } #lbNext { right: 8px; }
   #lbClose { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,.4); color: #fff;
              border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; z-index: 2; }
-  .swipe-hint { position: absolute; top: 50%; transform: translateY(-50%); font-size: 48px;
-                font-weight: 800; opacity: 0; pointer-events: none; transition: opacity .1s; }
-  #hintOk { right: 24px; color: #22c55e; } #hintNo { left: 24px; color: #ef4444; }
   .lb-panel { width: 360px; background: #1c1917; color: #e7e5e4; display: flex; flex-direction: column; }
   .lb-info { flex: 1; padding: 16px; overflow-y: auto; }
   .lb-info .cat { color: #a8a29e; margin-left: 6px; }
@@ -135,9 +132,7 @@
   <div class="lb-stage">
     <button id="lbClose">✕</button>
     <button class="lb-nav" id="lbPrev">‹</button>
-    <span class="swipe-hint" id="hintNo">БРАК</span>
     <img id="lbImg" src="" alt="">
-    <span class="swipe-hint" id="hintOk">В СТОК</span>
     <button class="lb-nav" id="lbNext">›</button>
   </div>
   <div class="lb-panel">
@@ -388,23 +383,20 @@ function _closeConfirm(val) {
 $('#cfOk').onclick = () => _closeConfirm(true);
 $('#cfCancel').onclick = () => _closeConfirm(false);
 
-// --- свайп (Tinder) ---
+// --- свайп: пролистывание коллекции (влево — дальше, вправо — назад) ---
 let sx = 0, sdx = 0, swiping = false;
 const img = $('#lbImg');
 img.addEventListener('touchstart', e => { sx = e.touches[0].clientX; sdx = 0; swiping = true; }, {passive:true});
 img.addEventListener('touchmove', e => {
   if (!swiping) return;
   sdx = e.touches[0].clientX - sx;
-  img.style.transform = `translateX(${sdx}px) rotate(${sdx/25}deg)`;
-  $('#hintOk').style.opacity = sdx > 30 ? Math.min(1, sdx/120) : 0;
-  $('#hintNo').style.opacity = sdx < -30 ? Math.min(1, -sdx/120) : 0;
+  img.style.transform = `translateX(${sdx}px)`;   // лёгкое следование за пальцем
 }, {passive:true});
 img.addEventListener('touchend', () => {
   swiping = false;
-  $('#hintOk').style.opacity = 0; $('#hintNo').style.opacity = 0;
   img.style.transform = '';
-  if (sdx > 70) decide('approve');
-  else if (sdx < -70) decide('reject');
+  if (sdx < -50) nav(1);        // палец влево → следующий кадр
+  else if (sdx > 50) nav(-1);   // палец вправо → предыдущий кадр
 });
 
 $('#btnApprove').onclick = () => decide('approve');

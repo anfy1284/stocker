@@ -1,14 +1,21 @@
 """Физическая раскладка файлов по папкам согласно статусу + манифест дедупа.
 
-Идея: **папка = функция статуса**. Файл всегда лежит там, где велит статус, а
-``assets.original_path`` всегда указывает на его текущее место:
+Идея: **папка = функция статуса**, ровно одна физическая папка на каждую «кучу»
+интерфейса. Файл всегда лежит там, где велит его статус, а ``assets.original_path``
+всегда указывает на его текущее место. Так снимки любой кучи можно обрабатывать
+внешними средствами (Photoshop/Lightroom для одобренных, ручное/батником удаление
+брака и выгруженных), не заходя в приложение:
 
-  * ``stock_candidate``            → ``stock_dir``   (изолированно отбирать/фотошопить)
-  * ``approved`` / ``described``   → ``approved_dir`` (фотошопить перед выгрузкой)
-  * ``uploaded``                   → ``done_dir``     (отработанные — можно удалять)
-  * всё остальное                  → ``inbox_dir``    (new/non_stock/rejected)
+  * ``new``                        → ``inbox_dir``     («Нераспределённые», приём из inbox)
+  * ``stock_candidate``            → ``stock_dir``     («Сток» — отбирать/фотошопить)
+  * ``non_stock``                  → ``non_stock_dir`` («Не-Сток»)
+  * ``approved`` / ``described``   → ``approved_dir``  («Одобрено» — фотошопить перед выгрузкой)
+  * ``rejected``                   → ``rejected_dir``  («Брак» — можно удалять)
+  * ``uploaded``                   → ``done_dir``      («Выгружено» — отработанные, можно удалять)
 
-Перемещение вызывается на переходах статуса (классификатор, ревью, выгрузка).
+Каждая куча = отдельная папка; добавление новой кучи в будущем — новая папка в
+``Config`` и строка в ``_STATUS_DIR`` ниже. Перемещение вызывается на переходах
+статуса (классификатор, ревью, выгрузка).
 Оно устойчиво: если файл занят (открыт в Photoshop) и переместить не вышло —
 статус всё равно меняется, файл остаётся на месте, а ``run_organize`` позже
 до-раскладывает всё (идемпотентно, самолечение; им же делается первичная раскладка).
@@ -28,6 +35,9 @@ from .config import Config
 from .db import (
     STATUS_APPROVED,
     STATUS_DESCRIBED,
+    STATUS_NEW,
+    STATUS_NON_STOCK,
+    STATUS_REJECTED,
     STATUS_STOCK_CANDIDATE,
     STATUS_UPLOADED,
     get_connection,
@@ -38,16 +48,26 @@ log = logging.getLogger(__name__)
 # Имя манифеста известных хешей в data_dir (интерфейс для будущего загрузчика).
 MANIFEST_NAME = "ingested.sha256"
 
+# Единый реестр «статус → папка его кучи» (одна физическая папка на кучу).
+# Значение — имя атрибута пути в ``Config``. ``approved``/``described`` — одна
+# куча «Одобрено», поэтому делят папку. Новая куча в будущем добавляется сюда.
+_STATUS_DIR: dict[str, str] = {
+    STATUS_NEW: "inbox_dir",
+    STATUS_STOCK_CANDIDATE: "stock_dir",
+    STATUS_NON_STOCK: "non_stock_dir",
+    STATUS_APPROVED: "approved_dir",
+    STATUS_DESCRIBED: "approved_dir",
+    STATUS_REJECTED: "rejected_dir",
+    STATUS_UPLOADED: "done_dir",
+}
+
 
 def folder_for_status(cfg: Config, status: str) -> Path:
-    """Папка, в которой должен лежать файл снимка с данным статусом."""
-    if status == STATUS_STOCK_CANDIDATE:
-        return cfg.stock_dir
-    if status in (STATUS_APPROVED, STATUS_DESCRIBED):
-        return cfg.approved_dir
-    if status == STATUS_UPLOADED:
-        return cfg.done_dir  # отработанные — в отдельную папку, чтобы потом удалить
-    return cfg.inbox_dir  # new, non_stock, rejected
+    """Папка, в которой должен лежать файл снимка с данным статусом.
+
+    Неизвестный статус попадает в inbox (безопасный дефолт «на разбор»).
+    """
+    return getattr(cfg, _STATUS_DIR.get(status, "inbox_dir"))
 
 
 def _is_placed(src: Path, target: Path, is_inbox: bool) -> bool:

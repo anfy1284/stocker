@@ -29,7 +29,9 @@ class Config:
     data_dir: Path
     inbox_dir: Path
     stock_dir: Path
+    non_stock_dir: Path
     approved_dir: Path
+    rejected_dir: Path
     done_dir: Path
     previews_dir: Path
     logs_dir: Path
@@ -55,7 +57,9 @@ class Config:
             self.data_dir,
             self.inbox_dir,
             self.stock_dir,
+            self.non_stock_dir,
             self.approved_dir,
+            self.rejected_dir,
             self.done_dir,
             self.previews_dir,
             self.logs_dir,
@@ -71,7 +75,9 @@ class Config:
             "data_dir": str(self.data_dir),
             "inbox_dir": str(self.inbox_dir),
             "stock_dir": str(self.stock_dir),
+            "non_stock_dir": str(self.non_stock_dir),
             "approved_dir": str(self.approved_dir),
+            "rejected_dir": str(self.rejected_dir),
             "done_dir": str(self.done_dir),
             "previews_dir": str(self.previews_dir),
             "logs_dir": str(self.logs_dir),
@@ -99,7 +105,9 @@ def load_config() -> Config:
         data_dir=data_dir,
         inbox_dir=_path_from_env("STOCKER_INBOX_DIR", data_dir / "inbox"),
         stock_dir=_path_from_env("STOCKER_STOCK_DIR", data_dir / "stock"),
+        non_stock_dir=_path_from_env("STOCKER_NON_STOCK_DIR", data_dir / "non_stock"),
         approved_dir=_path_from_env("STOCKER_APPROVED_DIR", data_dir / "approved"),
+        rejected_dir=_path_from_env("STOCKER_REJECTED_DIR", data_dir / "rejected"),
         done_dir=_path_from_env("STOCKER_DONE_DIR", data_dir / "done"),
         previews_dir=_path_from_env("STOCKER_PREVIEWS_DIR", data_dir / "previews"),
         logs_dir=_path_from_env("STOCKER_LOGS_DIR", data_dir / "logs"),

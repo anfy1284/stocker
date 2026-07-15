@@ -175,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Только собрать CSV, без соединения и заливки (проверка формата).",
     )
     sub.add_parser(
-        "organize", help="Разложить файлы по папкам согласно статусу (stock/approved/inbox)."
+        "organize", help="Разложить файлы по папкам согласно статусу (по одной папке на кучу)."
     )
     sub.add_parser(
         "manifest", help="Обновить манифест известных хешей (для дедупа загрузчика)."

@@ -149,7 +149,21 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
             except Exception:  # noqa: BLE001 — фоновая задача, не роняем сервер
                 log.exception("Ошибка фонового приёма новых файлов")
 
+    def _startup_relocate():
+        """Разово раскладывает уже имеющиеся файлы по папкам их статуса.
+
+        Нужно после изменения раскладки (напр. появления отдельных папок «Не-Сток»
+        и «Брак»): старые файлы, лежавшие в общей inbox, разъезжаются по своим
+        папкам. Идемпотентно и устойчиво к занятым файлам — что не вышло, добьёт
+        суточный авто-разбор/ручной ``stocker organize``. В фоне, чтобы не
+        задерживать старт сервера на большом архиве."""
+        try:
+            organize.run_organize(cfg)
+        except Exception:  # noqa: BLE001 — фоновая задача, не роняем сервер
+            log.exception("Ошибка стартовой раскладки файлов по папкам")
+
     if enable_scheduler:
+        threading.Thread(target=_startup_relocate, daemon=True).start()
         threading.Thread(target=_scheduler, daemon=True).start()
         threading.Thread(target=_intake_watch, daemon=True).start()
 
