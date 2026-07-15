@@ -60,22 +60,31 @@
   /* лайтбокс: десктоп — картинка слева, панель справа; мобила — столбиком */
   .lb { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.93); z-index: 100; }
   .lb.open { display: flex; flex-direction: row; }
-  .lb-stage { flex: 1; position: relative; overflow: hidden; display: flex;
-              align-items: center; justify-content: center; min-width: 0; }
+  .lb-stage { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  /* область картинки: клипует зум и соседние кадры; жесты — свайп и пинч-зум */
+  .lb-viewport { flex: 1; position: relative; overflow: hidden; display: flex;
+                 align-items: center; justify-content: center; min-height: 0; touch-action: none; }
   /* дорожка из трёх кадров (пред/текущий/след): едет за пальцем при свайпе */
-  .lb-track { position: absolute; inset: 0; will-change: transform; touch-action: pan-y; }
+  .lb-track { position: absolute; inset: 0; will-change: transform; }
   .lb-track > .lb-slide { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
                           display: flex; align-items: center; justify-content: center; }
   .lb-track > .lb-slide:nth-child(1) { transform: translateX(-100%); }  /* предыдущий — слева */
   .lb-track > .lb-slide:nth-child(3) { transform: translateX(100%); }   /* следующий — справа */
-  .lb-slide img { max-width: 100%; max-height: 100vh; object-fit: contain;
-                  user-select: none; -webkit-user-drag: none; }
-  .lb-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(0,0,0,.4);
-            color: #fff; border: none; font-size: 30px; width: 44px; height: 64px; cursor: pointer;
-            border-radius: 6px; z-index: 2; }
-  #lbPrev { left: 8px; } #lbNext { right: 8px; }
+  .lb-slide img { max-width: 100%; max-height: 100%; object-fit: contain;
+                  transform-origin: center center; user-select: none; -webkit-user-drag: none; }
   #lbClose { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,.4); color: #fff;
-             border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; z-index: 2; }
+             border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; z-index: 3; }
+  /* кнопка сброса зума (десктоп, колесо): видна только когда картинка увеличена */
+  .lb-reset { position: absolute; right: 12px; bottom: 12px; z-index: 3; background: rgba(0,0,0,.55);
+              color: #fff; border: 1px solid rgba(255,255,255,.25); border-radius: 20px;
+              padding: 7px 13px; font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; }
+  .lb-reset[hidden] { display: none; }
+  /* подпись под картинкой: ‹ слева, счётчик по центру, › справа (индикаторы, не кнопки) */
+  .lb-caption { display: flex; align-items: center; justify-content: space-between;
+                padding: 9px 20px; color: #a8a29e; font-size: 14px; user-select: none; flex: 0 0 auto; }
+  .lb-caption .cap-arrow { font-size: 24px; line-height: 1; color: #d6d3d1; width: 30px; }
+  .lb-caption .cap-arrow.r { text-align: right; }
+  .lb-caption .cap-count { font-variant-numeric: tabular-nums; letter-spacing: .5px; }
   .lb-panel { width: 360px; background: #1c1917; color: #e7e5e4; display: flex; flex-direction: column; }
   .lb-info { flex: 1; padding: 16px; overflow-y: auto; }
   .lb-info .cat { color: #a8a29e; margin-left: 6px; }
@@ -137,14 +146,20 @@
 
 <div class="lb" id="lb">
   <div class="lb-stage">
-    <div class="lb-track" id="lbTrack">
-      <div class="lb-slide"><img alt=""></div>
-      <div class="lb-slide"><img alt=""></div>
-      <div class="lb-slide"><img alt=""></div>
+    <div class="lb-viewport" id="lbViewport">
+      <div class="lb-track" id="lbTrack">
+        <div class="lb-slide"><img alt=""></div>
+        <div class="lb-slide"><img alt=""></div>
+        <div class="lb-slide"><img alt=""></div>
+      </div>
+      <button id="lbClose">✕</button>
+      <button class="lb-reset" id="lbReset" hidden>↺ 1×</button>
     </div>
-    <button id="lbClose">✕</button>
-    <button class="lb-nav" id="lbPrev">‹</button>
-    <button class="lb-nav" id="lbNext">›</button>
+    <div class="lb-caption">
+      <span class="cap-arrow">‹</span>
+      <span class="cap-count" id="lbCount"></span>
+      <span class="cap-arrow r">›</span>
+    </div>
   </div>
   <div class="lb-panel">
     <div class="lb-info" id="lbInfo"></div>
@@ -334,17 +349,20 @@ function fillTrack() {
   slideImgs[1].src = '/previews/' + at(0).preview;   // текущий (по центру)
   slideImgs[2].src = '/previews/' + at(1).preview;   // следующий (справа)
 }
+// счётчик «текущий/всего» под картинкой (idx 0-based → показываем +1)
+function updateCount() { $('#lbCount').textContent = items.length ? `${idx + 1}/${items.length}` : ''; }
 // мгновенно показать текущий кадр (открытие лайтбокса, обновление после решения)
 function renderLb() {
   if (!items.length) { closeLb(); return; }
   if (idx >= items.length) idx = items.length - 1;
   if (idx < 0) idx = 0;
+  resetZoom(false);            // новый кадр — всегда в обычном масштабе
   track.style.transition = 'none';
   track.style.transform = 'translateX(0)';
   fillTrack();
   renderInfoPanel(items[idx]);
+  updateCount();
 }
-function nav(d) { idx = (idx + d + items.length) % items.length; renderLb(); }
 
 // решение: approve|reject; при расхождении с ИИ — просим комментарий
 function isContradiction(a, action) {
@@ -408,25 +426,99 @@ function _closeConfirm(val) {
 $('#cfOk').onclick = () => _closeConfirm(true);
 $('#cfCancel').onclick = () => _closeConfirm(false);
 
+const track = $('#lbTrack');
+const slideImgs = [...track.querySelectorAll('img')];  // [пред, текущий, след]
+const viewport = $('#lbViewport');
+const resetBtn = $('#lbReset');
+const EASE = 'cubic-bezier(.22,.61,.36,1)';
+const MAXZOOM = 4;
+const wait = ms => new Promise(r => setTimeout(r, ms));
+let sx = 0, sdx = 0, swiping = false, animating = false;
+
+function vpW() { return viewport.clientWidth || window.innerWidth; }
+
+// --- зум текущего кадра (колесо на десктопе, пинч на мобиле) ---
+// Трансформ живёт на центральной картинке — отдельно от ленты (лента листает).
+let zs = 1, ztx = 0, zty = 0, zbw = 0, zbh = 0;  // масштаб, сдвиг, базовый размер кадра
+
+function applyZoom(animate) {
+  const im = slideImgs[1];
+  im.style.transition = animate ? `transform .25s ${EASE}` : 'none';
+  im.style.transform = `translate(${ztx}px, ${zty}px) scale(${zs})`;
+}
+// не давать увести увеличенный кадр за его же края
+function clampZoom() {
+  if (zs <= 1) { ztx = 0; zty = 0; return; }
+  const vr = viewport.getBoundingClientRect();
+  const maxX = Math.max(0, (zbw * zs - vr.width) / 2);
+  const maxY = Math.max(0, (zbh * zs - vr.height) / 2);
+  ztx = Math.min(maxX, Math.max(-maxX, ztx));
+  zty = Math.min(maxY, Math.max(-maxY, zty));
+}
+function updateResetBtn() {
+  const on = zs > 1.01;
+  resetBtn.hidden = !on;
+  if (on) resetBtn.textContent = `↺ ${zs.toFixed(1)}×`;
+  viewport.style.cursor = on ? 'grab' : '';
+}
+function resetZoom(animate) {
+  zs = 1; ztx = 0; zty = 0;
+  applyZoom(animate);
+  updateResetBtn();
+}
+// базовый (немасштабированный) размер кадра — снимаем, когда zs===1
+function captureBase() { const r = slideImgs[1].getBoundingClientRect(); zbw = r.width; zbh = r.height; }
+// зум до масштаба ns так, чтобы точка (px,py) относительно центра вьюпорта осталась на месте
+function zoomTo(ns, px, py) {
+  ns = Math.min(MAXZOOM, Math.max(1, ns));
+  const ratio = ns / zs;
+  ztx = px * (1 - ratio) + ztx * ratio;
+  zty = py * (1 - ratio) + zty * ratio;
+  zs = ns;
+  if (zs <= 1) { ztx = 0; zty = 0; }
+  clampZoom();
+  applyZoom(false);
+  updateResetBtn();
+}
+
+// колесо мыши — зум к курсору (десктоп); при zs>1 показываем кнопку сброса
+viewport.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (zs === 1) captureBase();
+  const vr = viewport.getBoundingClientRect();
+  const px = e.clientX - (vr.left + vr.width / 2);
+  const py = e.clientY - (vr.top + vr.height / 2);
+  zoomTo(zs * Math.exp(-e.deltaY * 0.0015), px, py);
+}, { passive: false });
+resetBtn.onclick = () => resetZoom(true);
+
+// перетаскивание мышью по увеличенному кадру (десктоп)
+let panning = false, panX = 0, panY = 0;
+viewport.addEventListener('mousedown', e => {
+  if (zs <= 1) return;
+  panning = true; panX = e.clientX - ztx; panY = e.clientY - zty;
+  viewport.style.cursor = 'grabbing'; e.preventDefault();
+});
+window.addEventListener('mousemove', e => {
+  if (!panning) return;
+  ztx = e.clientX - panX; zty = e.clientY - panY;
+  clampZoom(); applyZoom(false);
+});
+window.addEventListener('mouseup', () => {
+  if (!panning) return;
+  panning = false; viewport.style.cursor = zs > 1 ? 'grab' : '';
+});
+
 // --- пролистывание коллекции: дорожка из трёх кадров едет за пальцем ---
 // На сцене одновременно живут предыдущий, текущий и следующий кадры (лента шире
 // экрана). Палец тянет ленту 1:1 — сразу видно, как наезжает соседний кадр.
 // Хватило порога — лента доезжает до края и «переклеивается» вокруг нового
 // центра (закольцовано); не хватило — мягко пружинит обратно.
-const track = $('#lbTrack');
-const slideImgs = [...track.querySelectorAll('img')];  // [пред, текущий, след]
-const stage = document.querySelector('.lb-stage');
-const EASE = 'cubic-bezier(.22,.61,.36,1)';
-const wait = ms => new Promise(r => setTimeout(r, ms));
-let sx = 0, sdx = 0, swiping = false, animating = false;
-
-function stageW() { return stage.clientWidth || window.innerWidth; }
-
-// пролистнуть на dir (+1 вперёд / −1 назад): лента доезжает и переклеивается
 async function slide(dir) {
   if (animating || items.length < 2) return;
   animating = true;
-  const W = stageW();
+  resetZoom(false);                                      // листаем всегда в обычном масштабе
+  const W = vpW();
   track.style.transition = `transform .28s ${EASE}`;
   track.style.transform = `translateX(${-dir * W}px)`;   // доехать до соседнего кадра
   await wait(280);
@@ -435,24 +527,55 @@ async function slide(dir) {
   track.style.transform = 'translateX(0)';               // мгновенно переклеить ленту
   fillTrack();                                            // пересобрать пред/центр/след
   renderInfoPanel(items[idx]);
+  updateCount();
   track.getBoundingClientRect();                          // reflow, чтобы сброс применился
   animating = false;
 }
 
+// --- жесты касания: 1 палец — свайп ленты, 2 пальца — пинч-зум ---
+function touchDist(t) { return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
+function touchMid(t) {
+  const vr = viewport.getBoundingClientRect();
+  return { x: (t[0].clientX + t[1].clientX) / 2 - (vr.left + vr.width / 2),
+           y: (t[0].clientY + t[1].clientY) / 2 - (vr.top + vr.height / 2) };
+}
+let zooming = false, pinchDist0 = 0, pinchMid0 = { x: 0, y: 0 };
+
 track.addEventListener('touchstart', e => {
+  if (e.touches.length === 2) {           // пинч — начинаем зум
+    zooming = true; swiping = false;
+    captureBase();
+    pinchDist0 = touchDist(e.touches);
+    pinchMid0 = touchMid(e.touches);
+    return;
+  }
   if (animating || items.length < 2) return;
   sx = e.touches[0].clientX; sdx = 0; swiping = true;
   track.style.transition = 'none';        // тянем ленту без задержки
-}, {passive:true});
+}, { passive: true });
 track.addEventListener('touchmove', e => {
+  if (zooming && e.touches.length === 2) {
+    e.preventDefault();
+    const s = Math.min(MAXZOOM, Math.max(1, touchDist(e.touches) / pinchDist0));
+    const m = touchMid(e.touches);
+    zs = s;                               // масштаб вокруг точки старта + следование за пальцами
+    ztx = m.x - s * pinchMid0.x;
+    zty = m.y - s * pinchMid0.y;
+    applyZoom(false);
+    return;
+  }
   if (!swiping) return;
   sdx = e.touches[0].clientX - sx;
   track.style.transform = `translateX(${sdx}px)`;
-}, {passive:true});
-track.addEventListener('touchend', () => {
+}, { passive: false });
+track.addEventListener('touchend', e => {
+  if (zooming) {                          // отпустили пальцы — плавно вернуть 1× (как в Instagram)
+    if (e.touches.length === 0) { zooming = false; resetZoom(true); }
+    return;
+  }
   if (!swiping) return;
   swiping = false;
-  const threshold = Math.min(80, stageW() * 0.18);
+  const threshold = Math.min(80, vpW() * 0.18);
   if (sdx <= -threshold) slide(1);        // палец влево → следующий кадр
   else if (sdx >= threshold) slide(-1);   // палец вправо → предыдущий кадр
   else {                                   // короткий свайп — мягко вернуть на место
@@ -463,8 +586,6 @@ track.addEventListener('touchend', () => {
 
 $('#btnApprove').onclick = () => decide('approve');
 $('#btnReject').onclick = () => decide('reject');
-$('#lbPrev').onclick = () => slide(-1);
-$('#lbNext').onclick = () => slide(1);
 $('#lbClose').onclick = closeLb;
 document.addEventListener('keydown', e => {
   if (!$('#lb').classList.contains('open')) return;
