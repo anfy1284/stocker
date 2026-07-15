@@ -13,16 +13,18 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from pathlib import Path
 
 import anthropic
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from . import improver, metadata, organize, prompts, upload
+from . import classifier, improver, intake, metadata, organize, prompts, upload
 from .config import Config, load_config
 from .db import (
     STATUS_APPROVED,
     STATUS_DESCRIBED,
+    STATUS_NEW,
     STATUS_NON_STOCK,
     STATUS_REJECTED,
     STATUS_STOCK_CANDIDATE,
@@ -34,14 +36,19 @@ from .db import (
 log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent / "web"
 
-# Кучи, доступные в интерфейсе (в порядке показа).
+# Кучи, доступные в интерфейсе (в порядке показа). «Нераспределённые» (new) —
+# первыми: сюда попадают новые файлы из inbox, ждущие ИИ-разбора.
 PILES = (
+    STATUS_NEW,
     STATUS_STOCK_CANDIDATE,
     STATUS_NON_STOCK,
     STATUS_APPROVED,
     STATUS_UPLOADED,
     STATUS_REJECTED,
 )
+
+# Суточный интервал авто-разбора (приём + классификация новых файлов).
+_AUTO_INTERVAL = 24 * 3600
 
 # Статусы «одобренной» кучи: одобрены пользователем на триаже. Внутри —
 # ``described`` (метаданные готовы) и ``approved`` (метаданные ещё не сгенерированы).
@@ -51,12 +58,75 @@ APPROVED_PILE = (STATUS_APPROVED, STATUS_DESCRIBED)
 THUMB_MAX_SIDE = 320
 
 
-def create_app(cfg: Config | None = None) -> Flask:
+def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Flask:
     cfg = cfg or load_config()
     app = Flask(__name__)
 
     def _conn():
         return get_connection(cfg.db_path)
+
+    # --- Фоновый разбор «Нераспределённых»: приём из inbox + пакетная классификация.
+    # Запускается кнопкой в интерфейсе и автоматически раз в сутки (планировщик).
+    cls_lock = threading.Lock()
+    cls_state = {
+        "running": False,
+        "phase": None,   # intake | classify | None
+        "added": 0,      # принято новых файлов на этапе intake
+        "total": 0,      # снимков в разборе
+        "done": 0,
+        "stock": 0,
+        "non_stock": 0,
+        "errors": 0,
+        "error": None,   # фатальная ошибка (нет ключа, сбой батча)
+    }
+
+    def _classify_worker():
+        try:
+            with cls_lock:
+                cls_state["phase"] = "intake"
+            added = intake.run_intake(cfg)["added"]
+            with cls_lock:
+                cls_state.update(added=added, phase="classify")
+
+            def on_progress(s: dict) -> None:
+                with cls_lock:
+                    cls_state.update(
+                        total=s["total"], done=s["done"], stock=s["stock"],
+                        non_stock=s["non_stock"], errors=s["errors"],
+                    )
+
+            classifier.run_classification(cfg, on_progress=on_progress)
+        except Exception as exc:  # noqa: BLE001 — показываем причину пользователю
+            log.exception("Фатальная ошибка авто-разбора")
+            with cls_lock:
+                cls_state["error"] = str(exc)
+        finally:
+            with cls_lock:
+                cls_state.update(running=False, phase=None)
+
+    def _start_classify() -> bool:
+        """Запускает разбор, если он ещё не идёт. Возвращает, стартовал ли."""
+        with cls_lock:
+            if cls_state["running"]:
+                return False
+            cls_state.update(
+                running=True, phase=None, added=0, total=0, done=0,
+                stock=0, non_stock=0, errors=0, error=None,
+            )
+        threading.Thread(target=_classify_worker, daemon=True).start()
+        return True
+
+    def _scheduler():
+        """Раз в сутки проверяет inbox и разбирает новые файлы (авто-режим)."""
+        time.sleep(5)  # дать серверу подняться
+        while True:
+            if cfg.has_api_key:
+                if _start_classify():
+                    log.info("Авто-разбор: запущена суточная проверка новых файлов.")
+            time.sleep(_AUTO_INTERVAL)
+
+    if enable_scheduler:
+        threading.Thread(target=_scheduler, daemon=True).start()
 
     # --- Фоновый процесс генерации метаданных ------------------------------
     # Один процесс на сервер: пользователь жмёт кнопку в шапке, генерация идёт
@@ -305,6 +375,23 @@ def create_app(cfg: Config | None = None) -> Flask:
         log.info("Массовый перенос в брак: %d снимков из «Не-Сток»", count)
         return jsonify({"ok": True, "count": count})
 
+    @app.post("/api/classify/run")
+    def classify_run():
+        """Запускает фоновый разбор новых файлов (приём + пакетная классификация)."""
+        if not cfg.has_api_key:
+            return jsonify({"ok": False, "error": "no_key"}), 400
+        if not _start_classify():
+            return jsonify({"ok": False, "running": True}), 409
+        return jsonify({"ok": True})
+
+    @app.get("/api/classify/status")
+    def classify_status():
+        """Текущее состояние разбора (для прогресс-бара)."""
+        with cls_lock:
+            state = dict(cls_state)
+        state["has_key"] = cfg.has_api_key
+        return jsonify(state)
+
     @app.post("/api/metadata/run")
     def metadata_run():
         """Запускает фоновую генерацию метаданных для одобренных снимков."""
@@ -410,6 +497,6 @@ def run_server(cfg: Config, host: str = "0.0.0.0", port: int = 8000) -> None:
     """Запускает сервер, слушая LAN (доступен с телефона в той же сети)."""
     cfg.ensure_dirs()
     init_db(cfg.db_path)
-    app = create_app(cfg)
+    app = create_app(cfg, enable_scheduler=True)  # суточный авто-разбор новых файлов
     log.info("Веб-интерфейс запущен: http://localhost:%d (и по LAN-адресу ПК)", port)
     app.run(host=host, port=port, threaded=True)

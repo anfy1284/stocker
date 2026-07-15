@@ -25,7 +25,9 @@
   .badge.described { background: #dcfce7; color: #166534; }
   .badge.nometa { background: #fee2e2; color: #991b1b; }
   .badge.uploaded { background: #ede9fe; color: #6d28d9; }
+  .badge.newb { background: #ffedd5; color: #9a3412; }
   #empty { padding: 40px; text-align: center; color: #a8a29e; }
+  #bar .btn.go { background: #2563eb; color: #fff; border-color: #2563eb; }
   #bar .btn.up { background: #6d28d9; color: #fff; border-color: #6d28d9; }
   .barbar { display: inline-block; width: 160px; height: 8px; background: #bfdbfe;
             border-radius: 5px; overflow: hidden; vertical-align: middle; margin-left: 10px; }
@@ -111,7 +113,8 @@
 
 <header>
   <b>Stocker</b>
-  <button class="tab active" data-s="stock_candidate">Сток <span>0</span></button>
+  <button class="tab active" data-s="new">Нераспределённые <span>0</span></button>
+  <button class="tab" data-s="stock_candidate">Сток <span>0</span></button>
   <button class="tab" data-s="non_stock">Не-Сток <span>0</span></button>
   <button class="tab" data-s="approved">Одобрено <span>0</span></button>
   <button class="tab" data-s="uploaded">Выгружено <span>0</span></button>
@@ -215,6 +218,8 @@ let offeredMeta = false; // предложение «запустить» пок
 let upPoll = null;       // id интервала опроса статуса выгрузки
 let upStatus = null;     // последний ответ /api/upload/status (для прогресса)
 let upCsvDownloaded = false; // авто-скачивание CSV делаем один раз за выгрузку
+let clsPoll = null;      // id интервала опроса статуса разбора
+let clsStatus = null;    // последний ответ /api/classify/status (для прогресса)
 
 function fmtDate(iso) {
   const d = new Date(iso);
@@ -222,7 +227,7 @@ function fmtDate(iso) {
   return `${p(d.getDate())}.${p(d.getMonth()+1)}.${String(d.getFullYear()).slice(2)} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 function badgeFor(s) {
-  return { stock_candidate:['ok','СТОК'], non_stock:['no','НЕ-СТОК'],
+  return { new:['newb','НОВОЕ'], stock_candidate:['ok','СТОК'], non_stock:['no','НЕ-СТОК'],
            approved:['approved','ОДОБРЕНО'], described:['described','ОПИСАНО'],
            uploaded:['uploaded','ВЫГРУЖЕНО'], rejected:['rejected','БРАК'] }[s];
 }
@@ -463,6 +468,7 @@ function updateMetaButton() {
 }
 function renderBanner() {
   const bar = $('#bar');
+  if (pile === 'new') { renderNewBanner(bar); return; }
   if (pile === 'non_stock') { renderNonStockBanner(bar); return; }
   if (pile !== 'approved') { bar.style.display = 'none'; return; }
   const total = summary.approved || 0, pending = summary.meta_pending || 0, ready = total - pending;
@@ -490,6 +496,50 @@ function renderBanner() {
       + `<button class="btn" id="barRun">Описать одобренные</button>`;
     $('#barRun').onclick = startMeta;
   }
+}
+function renderNewBanner(bar) {
+  bar.style.display = 'block';
+  if (clsPoll && clsStatus) {                    // идёт разбор
+    bar.className = 'run';
+    if (clsStatus.phase === 'intake') { bar.textContent = 'Ищу новые файлы в inbox…'; return; }
+    const seen = clsStatus.done, t = clsStatus.total;
+    const pct = t ? Math.round(seen / t * 100) : 0;
+    bar.innerHTML = `Распределяю: ${t ? seen + '/' + t : 'подготовка…'}`
+      + (clsStatus.errors ? ` · ошибок ${clsStatus.errors}` : '')
+      + `<span class="barbar"><span style="width:${pct}%"></span></span>`;
+    return;
+  }
+  const n = summary.new || 0;
+  bar.className = 'neutral';
+  bar.innerHTML = (n
+    ? `Новых снимков: ${n} — ждут ИИ-разбора. `
+    : `Новых снимков нет. Проверить inbox и разобрать: `)
+    + `<button class="btn go" id="barClassify">✨ ${n ? 'Распределить (' + n + ')' : 'Запустить разбор'}</button>`;
+  $('#barClassify').onclick = startClassify;
+}
+async function startClassify() {
+  const r = await fetch('/api/classify/run', { method: 'POST' });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    if (j.error === 'no_key') { alert('ANTHROPIC_API_KEY не задан в .env — разбор невозможен.'); return; }
+    if (r.status !== 409) { alert('Не удалось запустить разбор.'); return; }
+  }
+  clsStatus = { running: true, phase: 'intake', total: 0, done: 0, errors: 0 };
+  pollClassify();
+}
+function pollClassify() {
+  if (clsPoll) return;
+  const tick = async () => {
+    const st = await api('/api/classify/status');
+    clsStatus = st;
+    if (st.running) { if (pile === 'new') renderBanner(); return; }
+    clearInterval(clsPoll); clsPoll = null;
+    if (st.error) alert('Ошибка разбора: ' + st.error);
+    await refreshCounts();
+    if (pile === 'new') loadPile('new'); // разобранные ушли из группы
+  };
+  clsPoll = setInterval(tick, 1500);
+  tick();
 }
 function renderNonStockBanner(bar) {
   const n = summary.non_stock || 0;
@@ -606,10 +656,11 @@ function pollUpload() {
 }
 $('#udClose').onclick = () => $('#uploadDoneModal').classList.remove('open');
 
-// при загрузке: если генерация/выгрузка уже идёт (перезагрузили страницу) — подхватить
+// при загрузке: если генерация/выгрузка/разбор уже идёт (перезагрузили страницу) — подхватить
 api('/api/metadata/status').then(st => { if (st.running) pollMeta(); });
 api('/api/upload/status').then(st => { if (st.running) { upStatus = st; pollUpload(); } });
+api('/api/classify/status').then(st => { if (st.running) { clsStatus = st; pollClassify(); } });
 
-loadPile('stock_candidate');
+loadPile('new');
 </script>
 </body></html>

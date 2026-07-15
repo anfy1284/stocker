@@ -12,10 +12,16 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
+from collections.abc import Callable
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 import anthropic
+from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+from anthropic.types.messages.batch_create_params import Request
+from PIL import Image
 
 from . import costs, organize
 from .config import Config
@@ -33,6 +39,14 @@ log = logging.getLogger(__name__)
 # Haiku 4.5 — дёшево и достаточно для классификации/комплаенса (см. ТЗ §4).
 MODEL = "claude-haiku-4-5"
 MAX_TOKENS = 1024
+
+# Разбор идёт через Batch API — вдвое дешевле обычных вызовов (пакетный разбор
+# архива, Шаг 12). Плюс для классификации шлём УМЕНЬШЕННУЮ картинку (стоковость
+# видна и на 512px), что дополнительно срезает входные токены.
+BATCH_DISCOUNT = 0.5
+CLASSIFY_MAX_SIDE = 512
+CLASSIFY_QUALITY = 70
+_POLL_INTERVAL = 8  # секунд между опросами статуса батча
 
 # Системный промпт версионируется и хранится в БД (см. prompts.py); он больше
 # не константа. Здесь — только неизменная реплика пользователя к каждому кадру.
@@ -63,40 +77,45 @@ _VERDICT_SCHEMA = {
 }
 
 
-def _encode_image(path: Path) -> str:
-    return base64.standard_b64encode(path.read_bytes()).decode("ascii")
+def _small_image_b64(preview_path: Path) -> str:
+    """Base64 уменьшенной (≤512px) версии превью — меньше входных токенов."""
+    with Image.open(preview_path) as im:
+        im = im.convert("RGB")
+        im.thumbnail((CLASSIFY_MAX_SIDE, CLASSIFY_MAX_SIDE))
+        buf = BytesIO()
+        im.save(buf, "JPEG", quality=CLASSIFY_QUALITY)
+    return base64.standard_b64encode(buf.getvalue()).decode("ascii")
 
 
-def _classify_image(
-    client: anthropic.Anthropic, preview_path: Path, system_prompt: str
-) -> tuple[dict[str, object], object]:
-    """Один vision-запрос к Haiku; возвращает (вердикт, usage для учёта расходов)."""
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=system_prompt,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": _encode_image(preview_path),
+def _build_request(asset_id: int, preview_path: Path, system_prompt: str) -> Request:
+    """Одна строка батча: vision-запрос к Haiku по уменьшенной картинке."""
+    return Request(
+        custom_id=str(asset_id),
+        params=MessageCreateParamsNonStreaming(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": _small_image_b64(preview_path),
+                            },
                         },
-                    },
-                    {"type": "text", "text": USER_PROMPT},
-                ],
-            }
-        ],
-        output_config={"format": {"type": "json_schema", "schema": _VERDICT_SCHEMA}},
+                        {"type": "text", "text": USER_PROMPT},
+                    ],
+                }
+            ],
+            output_config={
+                "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA}
+            },
+        ),
     )
-    if response.stop_reason == "refusal":
-        raise RuntimeError("модель отклонила запрос (refusal)")
-    text = next(b.text for b in response.content if b.type == "text")
-    return json.loads(text), response.usage
 
 
 def _apply_verdict(conn, asset_id: int, verdict: dict[str, object]) -> None:
@@ -132,15 +151,46 @@ def _apply_verdict(conn, asset_id: int, verdict: dict[str, object]) -> None:
     )
 
 
-def run_classification(cfg: Config) -> dict[str, int]:
-    """Классифицирует все снимки со статусом «новый». Возвращает статистику."""
+def _apply_result(conn, cfg: Config, asset_id: int, message, stats: dict) -> None:
+    """Разбирает ответ модели по одному снимку: вердикт → БД → папка → расход."""
+    if getattr(message, "stop_reason", None) == "refusal":
+        raise RuntimeError("модель отклонила запрос (refusal)")
+    text = next(b.text for b in message.content if b.type == "text")
+    verdict = json.loads(text)
+    _apply_verdict(conn, asset_id, verdict)
+    # Пакетный разбор вдвое дешевле — учитываем это в стоимости.
+    costs.record(conn, MODEL, "classify", asset_id, message.usage, discount=BATCH_DISCOUNT)
+    new_status = (
+        STATUS_STOCK_CANDIDATE if verdict["stock_worthy"] else STATUS_NON_STOCK
+    )
+    organize.relocate(conn, cfg, asset_id, new_status)  # сток-кандидаты → stock/
+    conn.commit()
+    if verdict["stock_worthy"]:
+        stats["stock"] += 1
+    else:
+        stats["non_stock"] += 1
+
+
+def run_classification(
+    cfg: Config, on_progress: Callable[[dict], None] | None = None
+) -> dict[str, int]:
+    """Классифицирует все «новые» снимки пакетом через Batch API.
+
+    ``on_progress`` (если задан) вызывается с копией статистики (плюс ``done`` —
+    сколько снимков уже обработано) при отправке, во время опроса батча и после
+    применения результатов — веб-интерфейс двигает прогресс-бар.
+    """
     if not cfg.has_api_key:
         raise RuntimeError(
             "ANTHROPIC_API_KEY не задан — классификация невозможна (см. .env)."
         )
 
     client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
-    stats = {"total": 0, "stock": 0, "non_stock": 0, "errors": 0}
+    stats = {"total": 0, "stock": 0, "non_stock": 0, "errors": 0, "done": 0}
+
+    def report() -> None:
+        if on_progress:
+            on_progress(dict(stats))
 
     conn = get_connection(cfg.db_path)
     try:
@@ -156,35 +206,43 @@ def run_classification(cfg: Config) -> dict[str, int]:
             "SELECT id, preview_path FROM assets WHERE status = ?", (STATUS_NEW,)
         ).fetchall()
         stats["total"] = len(rows)
+        report()
+        if not rows:
+            log.info("Нет новых снимков для классификации.")
+            return stats
 
-        for row in rows:
+        requests = [
+            _build_request(row["id"], Path(row["preview_path"]), system_prompt)
+            for row in rows
+        ]
+        batch = client.messages.batches.create(requests=requests)
+        log.info("Батч классификации создан: %s (%d снимков)", batch.id, len(requests))
+
+        # Опрос до завершения. Прогресс — по счётчикам обработанных батчем запросов.
+        while True:
+            info = client.messages.batches.retrieve(batch.id)
+            if info.processing_status == "ended":
+                break
+            counts = info.request_counts
+            stats["done"] = (
+                counts.succeeded + counts.errored + counts.canceled + counts.expired
+            )
+            report()
+            time.sleep(_POLL_INTERVAL)
+
+        # Результаты приходят в произвольном порядке — раскладываем по custom_id.
+        stats["done"] = 0
+        for result in client.messages.batches.results(batch.id):
+            asset_id = int(result.custom_id)
             try:
-                verdict, usage = _classify_image(
-                    client, Path(row["preview_path"]), system_prompt
-                )
-                _apply_verdict(conn, row["id"], verdict)
-                costs.record(conn, MODEL, "classify", row["id"], usage)
-                # Сток-кандидаты уезжают в отдельную папку для отбора/фотошопа.
-                new_status = (
-                    STATUS_STOCK_CANDIDATE
-                    if verdict["stock_worthy"]
-                    else STATUS_NON_STOCK
-                )
-                organize.relocate(conn, cfg, row["id"], new_status)
-                conn.commit()
-                if verdict["stock_worthy"]:
-                    stats["stock"] += 1
-                else:
-                    stats["non_stock"] += 1
-                log.info(
-                    "Снимок %d: %s — %s",
-                    row["id"],
-                    "сток" if verdict["stock_worthy"] else "не-сток",
-                    verdict["reason"],
-                )
+                if result.result.type != "succeeded":
+                    raise RuntimeError(f"результат батча: {result.result.type}")
+                _apply_result(conn, cfg, asset_id, result.result.message, stats)
             except Exception:
                 stats["errors"] += 1
-                log.exception("Ошибка классификации снимка %d", row["id"])
+                log.exception("Ошибка классификации снимка %d", asset_id)
+            stats["done"] += 1
+            report()
     finally:
         conn.close()
 
