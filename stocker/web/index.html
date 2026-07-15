@@ -496,7 +496,7 @@ function renderNewBanner(bar) {
     if (clsStatus.phase === 'intake') { bar.textContent = 'Ищу новые файлы в inbox…'; return; }
     const seen = clsStatus.done, t = clsStatus.total;
     const pct = t ? Math.round(seen / t * 100) : 0;
-    const note = clsStatus.batch ? ' · пакетом, может занять минуты (можно закрыть страницу)' : '';
+    const note = clsStatus.batch ? ' · пакетный режим асинхронный: может занять от минут до часа и дольше (можно закрыть страницу)' : '';
     bar.innerHTML = `Распределяю: ${t ? seen + '/' + t : 'подготовка…'}`
       + (clsStatus.errors ? ` · ошибок ${clsStatus.errors}` : '') + note
       + `<span class="barbar"><span style="width:${pct}%"></span></span>`;
