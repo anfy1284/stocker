@@ -700,6 +700,7 @@ function renderBanner() {
   if (pile === 'new') { renderNewBanner(bar); return; }
   if (pile === 'non_stock') { renderNonStockBanner(bar); return; }
   if (pile === 'prefiltered') { renderPrefilteredBanner(bar); return; }
+  if (pile === 'rejected') { renderRejectedBanner(bar); return; }
   if (pile !== 'approved') { bar.style.display = 'none'; return; }
   const total = summary.approved || 0, pending = summary.meta_pending || 0, ready = total - pending;
   bar.style.display = 'block';
@@ -806,6 +807,28 @@ async function deleteAllPrefiltered() {
   await fetch('/api/piles/prefiltered/delete_all', { method: 'POST' });
   await refreshCounts();
   if (pile === 'prefiltered') loadPile('prefiltered');
+}
+// --- куча «Брак»: банер с безвозвратным удалением всей кучи ---
+function renderRejectedBanner(bar) {
+  const n = summary.rejected || 0;
+  if (n === 0) { bar.style.display = 'none'; return; }
+  bar.style.display = 'block';
+  bar.className = 'neutral';
+  bar.innerHTML = `В «Браке» ${n} фото (файлы на месте). `
+    + `<button class="btn danger" id="barDelRejected">🗑 Удалить все (${n})</button>`;
+  $('#barDelRejected').onclick = deleteAllRejected;
+}
+async function deleteAllRejected() {
+  const n = summary.rejected || 0;
+  if (!n) return;
+  const ok = await confirmAction(
+    'Удалить весь «Брак»?',
+    `${n} забракованных фото будут БЕЗВОЗВРАТНО удалены с диска вместе с превью и записями. Отменить нельзя.`,
+    'Удалить навсегда', '#dc2626');
+  if (!ok) return;
+  await fetch('/api/piles/rejected/delete_all', { method: 'POST' });
+  await refreshCounts();
+  if (pile === 'rejected') loadPile('rejected');
 }
 async function refreshInbox() {
   const btn = $('#barRefresh');

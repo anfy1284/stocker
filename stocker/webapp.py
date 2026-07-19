@@ -535,24 +535,23 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
         with pf_lock:
             return jsonify(dict(pf_state))
 
-    @app.post("/api/piles/prefiltered/delete_all")
-    def delete_all_prefiltered():
-        """Безвозвратно удаляет всю кучу «Предотсев»: файлы-оригиналы, превью,
-        миниатюры и записи. Освобождает диск от локально отсеянного не-стока.
+    def _purge_pile(status: str, label: str):
+        """Безвозвратно удаляет всю кучу данного статуса: файлы-оригиналы, превью,
+        миниатюры и записи. Освобождает диск от отсеянных/бракованных снимков.
 
         Необратимо (в интерфейсе — под подтверждением). Порядок: сначала файлы
         (best-effort — отсутствие/занятость не срывают чистку), затем зависимые
         строки (история хешей и фидбэк ссылаются на снимок по внешнему ключу) и
-        сама запись. Манифест хешей после этого перестраивается: удалённый мусор
+        сама запись. Манифест хешей после этого перестраивается: удалённый снимок
         больше не «известен», поэтому при повторной загрузке будет принят заново
-        и снова отсеян локально (бесплатно) — платного разбора это не касается.
+        (и снова отсеян локально бесплатно) — платного разбора это не касается.
         """
         conn = _conn()
         deleted = 0
         try:
             rows = conn.execute(
                 "SELECT id, original_path, preview_path FROM assets WHERE status = ?",
-                (STATUS_PREFILTERED,),
+                (status,),
             ).fetchall()
             for r in rows:
                 for p in (r["original_path"], r["preview_path"]):
@@ -560,7 +559,7 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
                         try:
                             Path(p).unlink(missing_ok=True)
                         except OSError:
-                            log.warning("Предотсев: не удалить файл %s", p)
+                            log.warning("%s: не удалить файл %s", label, p)
                 if r["preview_path"]:
                     try:
                         (cfg.thumbs_dir / Path(r["preview_path"]).name).unlink(
@@ -576,8 +575,18 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
         finally:
             conn.close()
         organize.write_manifest(cfg)
-        log.info("Удалена куча «Предотсев»: %d снимков (файлы + записи)", deleted)
+        log.info("Удалена куча «%s»: %d снимков (файлы + записи)", label, deleted)
         return jsonify({"ok": True, "count": deleted})
+
+    @app.post("/api/piles/prefiltered/delete_all")
+    def delete_all_prefiltered():
+        """Безвозвратно удаляет всю кучу «Предотсев» (см. :func:`_purge_pile`)."""
+        return _purge_pile(STATUS_PREFILTERED, "Предотсев")
+
+    @app.post("/api/piles/rejected/delete_all")
+    def delete_all_rejected():
+        """Безвозвратно удаляет всю кучу «Брак» (см. :func:`_purge_pile`)."""
+        return _purge_pile(STATUS_REJECTED, "Брак")
 
     @app.post("/api/metadata/run")
     def metadata_run():
