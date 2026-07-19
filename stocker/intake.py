@@ -17,7 +17,12 @@ from PIL import ExifTags, Image, ImageOps
 
 from . import organize
 from .config import Config
-from .db import STATUS_NEW, get_connection
+from .db import (
+    STATUS_APPROVED,
+    STATUS_DESCRIBED,
+    STATUS_NEW,
+    get_connection,
+)
 
 log = logging.getLogger(__name__)
 
@@ -103,11 +108,25 @@ def _scan(inbox_dir: Path) -> list[Path]:
 
 
 def _asset_by_hash(conn, content_hash: str):
-    """Уже принятый снимок с таким содержимым (id, путь) — или None."""
+    """Снимок, у которого такое содержимое было *когда-либо* (id, путь) — или None.
+
+    Ищем по всей истории хешей, а не только по текущему: тогда вернувшийся в
+    inbox оригинал (версия до правки) опознаётся как дубль уже принятого снимка.
+    """
     return conn.execute(
-        "SELECT id, original_path FROM assets WHERE content_hash = ? LIMIT 1",
+        "SELECT a.id, a.original_path FROM asset_hashes h "
+        "JOIN assets a ON a.id = h.asset_id WHERE h.content_hash = ? LIMIT 1",
         (content_hash,),
     ).fetchone()
+
+
+def _record_hash(conn, asset_id: int, content_hash: str) -> None:
+    """Заносит хеш в историю снимка (идемпотентно)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO asset_hashes (content_hash, asset_id, created_at) "
+        "VALUES (?, ?, ?)",
+        (content_hash, asset_id, datetime.now().isoformat()),
+    )
 
 
 def _handle_known(conn, asset, path: Path) -> str:
@@ -146,12 +165,14 @@ def _process_file(path: Path, content_hash: str, previews_dir: Path) -> dict[str
         exif = _read_exif(img)
         width, height = _make_preview(img, preview_path)
 
+    stat = path.stat()
     return {
         "original_path": str(path.resolve()),
         "preview_path": str(preview_path),
         "content_hash": content_hash,
         "file_type": FILE_TYPE_JPEG,
-        "file_size": path.stat().st_size,
+        "file_size": stat.st_size,
+        "original_mtime": stat.st_mtime,
         "width": width,
         "height": height,
         "captured_at": exif["captured_at"],
@@ -163,10 +184,129 @@ def _process_file(path: Path, content_hash: str, previews_dir: Path) -> dict[str
     }
 
 
-def _insert(conn, record: dict[str, object]) -> None:
+def _insert(conn, record: dict[str, object]) -> int:
+    """Вставляет запись снимка, возвращает её id."""
     columns = ", ".join(record)
     placeholders = ", ".join(f":{k}" for k in record)
-    conn.execute(f"INSERT INTO assets ({columns}) VALUES ({placeholders})", record)
+    cur = conn.execute(
+        f"INSERT INTO assets ({columns}) VALUES ({placeholders})", record
+    )
+    return int(cur.lastrowid)
+
+
+def _drop_cached(cfg: Config, preview_path: str | None) -> None:
+    """Удаляет устаревшее превью и его миниатюру (после смены хеша снимка)."""
+    if not preview_path:
+        return
+    name = Path(preview_path).name
+    for cached in (cfg.previews_dir / name, cfg.thumbs_dir / name):
+        try:
+            cached.unlink(missing_ok=True)
+        except OSError:
+            log.warning("Не удалось удалить устаревший кеш: %s", cached)
+
+
+def _apply_edit(conn, cfg: Config, asset, path: Path, new_hash: str) -> None:
+    """Правка снимка на месте: та же карточка, новое содержимое.
+
+    Перехешируем, пересобираем превью под новым именем (``{new_hash}.jpg`` — сам
+    по себе сбрасывает кеши браузера и миниатюр), чистим старое превью/миниатюру,
+    обновляем EXIF/размеры/размер файла. Решения не трогаем — снимок тот же.
+
+    Метаданные Shutterstock (описание/ключи/категории) генерились по прежним
+    пикселям и после правки могут не соответствовать кадру (напр. с фото убрали
+    людей — «Hikers exploring…» уже неверно), поэтому их сбрасываем всегда —
+    универсально для любого статуса. Описанный снимок (ещё не выгружен) при этом
+    возвращаем в «Одобрено»: карточка станет «НЕТ МЕТА» и снова попадёт в
+    генерацию метаданных. Выгруженный оставляем выгруженным (мету всё равно
+    чистим, но больше ничего с ним не делаем). Файл из своей папки НЕ двигаем
+    (approved и described живут в одной папке, так что перекладка и не нужна).
+    Вердикт классификатора («Причина»/категория/флаги) — с предыдущего этапа,
+    оставляем. Новый хеш дописываем в историю (старый там остаётся — для
+    опознания вернувшегося оригинала).
+    """
+    new_preview = cfg.previews_dir / f"{new_hash}.jpg"
+    with Image.open(path) as img:
+        exif = _read_exif(img)
+        width, height = _make_preview(img, new_preview)
+
+    stat = path.stat()
+    # «Описано» → «Одобрено» (снова ждёт меты). Остальные статусы не трогаем.
+    new_status = (
+        STATUS_APPROVED if asset["status"] == STATUS_DESCRIBED else asset["status"]
+    )
+    conn.execute(
+        "UPDATE assets SET content_hash = ?, preview_path = ?, file_size = ?, "
+        "original_mtime = ?, width = ?, height = ?, captured_at = ?, "
+        "camera_make = ?, camera_model = ?, orientation = ?, "
+        "meta_description = NULL, meta_keywords = NULL, meta_category1 = NULL, "
+        "meta_category2 = NULL, meta_generated_at = NULL, status = ? WHERE id = ?",
+        (
+            new_hash,
+            str(new_preview),
+            stat.st_size,
+            stat.st_mtime,
+            width,
+            height,
+            exif["captured_at"],
+            exif["camera_make"],
+            exif["camera_model"],
+            exif["orientation"],
+            new_status,
+            asset["id"],
+        ),
+    )
+    _record_hash(conn, asset["id"], new_hash)
+    conn.commit()
+    if Path(asset["preview_path"] or "").name != new_preview.name:
+        _drop_cached(cfg, asset["preview_path"])
+
+
+def _detect_edits(conn, cfg: Config, stats: dict[str, int]) -> None:
+    """Ищет правки уже принятых файлов на месте (в папках любой кучи).
+
+    Правка снимка внешним редактором — штатное действие, но файл лежит не в
+    inbox, а в папке своей кучи, поэтому обычный скан его не видит. Здесь дёшево
+    (по mtime/размеру) отбираем изменившиеся файлы и перехешируем только их; при
+    смене хеша обновляем ту же карточку через :func:`_apply_edit`. На первом
+    прогоне после обновления схемы ``original_mtime`` пуст — тогда сверяем хеш
+    у всех, чтобы поймать правки, сделанные до появления этой логики.
+    """
+    rows = conn.execute(
+        "SELECT id, original_path, content_hash, preview_path, file_size, "
+        "original_mtime, status FROM assets"
+    ).fetchall()
+    for row in rows:
+        if not row["original_path"]:
+            continue
+        path = Path(row["original_path"])
+        if not path.exists():
+            continue
+        try:
+            stat = path.stat()
+            unchanged = (
+                row["original_mtime"] is not None
+                and abs(stat.st_mtime - row["original_mtime"]) < 1e-6
+                and stat.st_size == row["file_size"]
+            )
+            if unchanged:
+                continue
+            new_hash = _hash_file(path)
+            if new_hash == row["content_hash"]:
+                # Содержимое то же (правились лишь мета/время файла) — только
+                # запоминаем свежий mtime, чтобы больше не перехешировать зря.
+                conn.execute(
+                    "UPDATE assets SET original_mtime = ? WHERE id = ?",
+                    (stat.st_mtime, row["id"]),
+                )
+                conn.commit()
+                continue
+            _apply_edit(conn, cfg, row, path, new_hash)
+            stats["edited"] += 1
+            log.info("Обновлён снимок после правки на месте: %s", path.name)
+        except Exception:
+            stats["errors"] += 1
+            log.exception("Ошибка при обработке правки файла: %s", path)
 
 
 def run_intake(cfg: Config) -> dict[str, int]:
@@ -174,6 +314,7 @@ def run_intake(cfg: Config) -> dict[str, int]:
     stats = {
         "scanned": 0,
         "added": 0,
+        "edited": 0,
         "duplicate": 0,
         "cleaned": 0,
         "repaired": 0,
@@ -181,6 +322,9 @@ def run_intake(cfg: Config) -> dict[str, int]:
     }
     conn = get_connection(cfg.db_path)
     try:
+        # Сперва подхватываем правки уже принятых файлов (в папках их куч),
+        # затем сканируем inbox на новые/вернувшиеся исходники.
+        _detect_edits(conn, cfg, stats)
         for path in _scan(cfg.inbox_dir):
             stats["scanned"] += 1
             try:
@@ -190,7 +334,8 @@ def run_intake(cfg: Config) -> dict[str, int]:
                     stats[_handle_known(conn, known, path)] += 1
                     continue
                 record = _process_file(path, content_hash, cfg.previews_dir)
-                _insert(conn, record)
+                asset_id = _insert(conn, record)
+                _record_hash(conn, asset_id, content_hash)
                 conn.commit()
                 stats["added"] += 1
                 log.info("Принят: %s", path.name)
@@ -205,9 +350,9 @@ def run_intake(cfg: Config) -> dict[str, int]:
     organize.write_manifest(cfg)
 
     log.info(
-        "Приём завершён: найдено %(scanned)d, добавлено %(added)d, дублей "
-        "%(duplicate)d, вычищено копий %(cleaned)d, восстановлено %(repaired)d, "
-        "ошибок %(errors)d",
+        "Приём завершён: найдено %(scanned)d, добавлено %(added)d, обновлено "
+        "правок %(edited)d, дублей %(duplicate)d, вычищено копий %(cleaned)d, "
+        "восстановлено %(repaired)d, ошибок %(errors)d",
         stats,
     )
     return stats

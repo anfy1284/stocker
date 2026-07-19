@@ -26,6 +26,7 @@ from .db import (
     STATUS_DESCRIBED,
     STATUS_NEW,
     STATUS_NON_STOCK,
+    STATUS_PREFILTERED,
     STATUS_REJECTED,
     STATUS_STOCK_CANDIDATE,
     STATUS_UPLOADED,
@@ -42,6 +43,7 @@ PILES = (
     STATUS_NEW,
     STATUS_STOCK_CANDIDATE,
     STATUS_NON_STOCK,
+    STATUS_PREFILTERED,
     STATUS_APPROVED,
     STATUS_UPLOADED,
     STATUS_REJECTED,
@@ -123,6 +125,59 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
         threading.Thread(
             target=_classify_worker, args=(use_batch,), daemon=True
         ).start()
+        return True
+
+    # --- Фоновый локальный предотбор: приём из inbox + прогон нейросети на GPU.
+    # Бесплатно отсеивает явный не-сток до платного классификатора. Тяжёлый
+    # torch/open_clip импортируется лениво в воркере — сервер стартует без них.
+    pf_lock = threading.Lock()
+    pf_state = {
+        "running": False,
+        "phase": None,   # intake | prefilter | None
+        "added": 0,      # принято новых файлов на этапе intake
+        "total": 0,
+        "done": 0,
+        "kept": 0,       # оставлено (пойдут в API)
+        "filtered": 0,   # отсеяно в «Предотсев»
+        "errors": 0,
+        "error": None,   # фатальная ошибка (нет зависимостей и т.п.)
+    }
+
+    def _prefilter_worker():
+        try:
+            with pf_lock:
+                pf_state["phase"] = "intake"
+            added = intake.run_intake(cfg)["added"]
+            with pf_lock:
+                pf_state.update(added=added, phase="prefilter")
+
+            from . import prefilter
+
+            def on_progress(s: dict) -> None:
+                with pf_lock:
+                    pf_state.update(
+                        total=s["total"], done=s["done"], kept=s["kept"],
+                        filtered=s["filtered"], errors=s["errors"],
+                    )
+
+            prefilter.run_prefilter(cfg, on_progress=on_progress)
+        except Exception as exc:  # noqa: BLE001 — показываем причину пользователю
+            log.exception("Фатальная ошибка предотбора")
+            with pf_lock:
+                pf_state["error"] = str(exc)
+        finally:
+            with pf_lock:
+                pf_state.update(running=False, phase=None)
+
+    def _start_prefilter() -> bool:
+        with pf_lock:
+            if pf_state["running"]:
+                return False
+            pf_state.update(
+                running=True, phase=None, added=0, total=0, done=0, kept=0,
+                filtered=0, errors=0, error=None,
+            )
+        threading.Thread(target=_prefilter_worker, daemon=True).start()
         return True
 
     def _scheduler():
@@ -240,25 +295,33 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
 
     @app.get("/previews/<path:name>")
     def preview(name: str):
-        return send_from_directory(cfg.previews_dir, name)
+        # Имя = хеш содержимого: после правки фото меняется само имя, поэтому
+        # достаточно revalidate — старый URL не переиспользуется.
+        resp = send_from_directory(cfg.previews_dir, name)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     @app.get("/thumb/<path:name>")
     def thumb(name: str):
         """Маленькая миниатюра для сетки (кэшируется на диск) — лёгкая загрузка."""
-        thumbs = cfg.previews_dir.parent / "thumbs"
+        thumbs = cfg.thumbs_dir
         thumbs.mkdir(parents=True, exist_ok=True)
         dest = thumbs / name
-        if not dest.exists():
-            src = cfg.previews_dir / name
-            if not src.exists():
-                abort(404)
+        src = cfg.previews_dir / name
+        if not src.exists():
+            abort(404)
+        # Пересобираем, если миниатюры нет или превью новее (страховка на случай,
+        # если файл превью переписан под тем же именем).
+        if not dest.exists() or src.stat().st_mtime > dest.stat().st_mtime:
             from PIL import Image
 
             with Image.open(src) as im:
                 im = im.convert("RGB")
                 im.thumbnail((THUMB_MAX_SIDE, THUMB_MAX_SIDE))
                 im.save(dest, "JPEG", quality=80)
-        return send_from_directory(thumbs, name)
+        resp = send_from_directory(thumbs, name)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     def _count(conn, status: str) -> int:
         return conn.execute(
@@ -291,7 +354,8 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
                 "SELECT id, original_path, preview_path, status, category, "
                 "classification_reason, has_logo, has_brand, has_text, "
                 "meta_description, meta_keywords, meta_category1, meta_category2, "
-                "meta_generated_at, upload_name, uploaded_at, file_deleted "
+                "meta_generated_at, upload_name, uploaded_at, file_deleted, "
+                "prefilter_aesthetic, prefilter_reason, prefilter_hard_reject "
                 f"FROM assets WHERE status IN ({placeholders}) ORDER BY id",
                 wanted,
             ).fetchall()
@@ -351,6 +415,15 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
                             else None
                         ),
                         "file_deleted": file_deleted,
+                        "prefilter": (
+                            {
+                                "aesthetic": r["prefilter_aesthetic"],
+                                "reason": r["prefilter_reason"],
+                                "hard": bool(r["prefilter_hard_reject"]),
+                            }
+                            if r["status"] == STATUS_PREFILTERED
+                            else None
+                        ),
                     }
                 )
         finally:
@@ -376,7 +449,12 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
             contradiction = (action == "approve" and old == STATUS_NON_STOCK) or (
                 action == "reject" and old == STATUS_STOCK_CANDIDATE
             )
-            new_status = STATUS_APPROVED if action == "approve" else STATUS_REJECTED
+            if action == "approve":
+                # Спасение из «Предотсева» — назад в разбор (снимок ещё не видел
+                # платного классификатора), а не сразу в одобренные.
+                new_status = STATUS_NEW if old == STATUS_PREFILTERED else STATUS_APPROVED
+            else:
+                new_status = STATUS_REJECTED
             conn.execute(
                 "UPDATE assets SET status = ? WHERE id = ?", (new_status, asset_id)
             )
@@ -442,6 +520,64 @@ def create_app(cfg: Config | None = None, enable_scheduler: bool = False) -> Fla
         «Нераспределённые» (без разбора). ИИ не задействован."""
         added = intake.run_intake(cfg)["added"]
         return jsonify({"ok": True, "added": added})
+
+    @app.post("/api/prefilter/run")
+    def prefilter_run():
+        """Запускает локальный предотбор (приём из inbox + прогон нейросети на
+        GPU). Бесплатно отсеивает явный не-сток до платного классификатора."""
+        if not _start_prefilter():
+            return jsonify({"ok": False, "running": True}), 409
+        return jsonify({"ok": True})
+
+    @app.get("/api/prefilter/status")
+    def prefilter_status():
+        """Текущее состояние предотбора (для прогресс-бара)."""
+        with pf_lock:
+            return jsonify(dict(pf_state))
+
+    @app.post("/api/piles/prefiltered/delete_all")
+    def delete_all_prefiltered():
+        """Безвозвратно удаляет всю кучу «Предотсев»: файлы-оригиналы, превью,
+        миниатюры и записи. Освобождает диск от локально отсеянного не-стока.
+
+        Необратимо (в интерфейсе — под подтверждением). Порядок: сначала файлы
+        (best-effort — отсутствие/занятость не срывают чистку), затем зависимые
+        строки (история хешей и фидбэк ссылаются на снимок по внешнему ключу) и
+        сама запись. Манифест хешей после этого перестраивается: удалённый мусор
+        больше не «известен», поэтому при повторной загрузке будет принят заново
+        и снова отсеян локально (бесплатно) — платного разбора это не касается.
+        """
+        conn = _conn()
+        deleted = 0
+        try:
+            rows = conn.execute(
+                "SELECT id, original_path, preview_path FROM assets WHERE status = ?",
+                (STATUS_PREFILTERED,),
+            ).fetchall()
+            for r in rows:
+                for p in (r["original_path"], r["preview_path"]):
+                    if p:
+                        try:
+                            Path(p).unlink(missing_ok=True)
+                        except OSError:
+                            log.warning("Предотсев: не удалить файл %s", p)
+                if r["preview_path"]:
+                    try:
+                        (cfg.thumbs_dir / Path(r["preview_path"]).name).unlink(
+                            missing_ok=True
+                        )
+                    except OSError:
+                        pass
+                conn.execute("DELETE FROM asset_hashes WHERE asset_id = ?", (r["id"],))
+                conn.execute("DELETE FROM feedback WHERE asset_id = ?", (r["id"],))
+                conn.execute("DELETE FROM assets WHERE id = ?", (r["id"],))
+                deleted += 1
+            conn.commit()
+        finally:
+            conn.close()
+        organize.write_manifest(cfg)
+        log.info("Удалена куча «Предотсев»: %d снимков (файлы + записи)", deleted)
+        return jsonify({"ok": True, "count": deleted})
 
     @app.post("/api/metadata/run")
     def metadata_run():

@@ -26,6 +26,7 @@
   .badge.nometa { background: #fee2e2; color: #991b1b; }
   .badge.uploaded { background: #ede9fe; color: #6d28d9; }
   .badge.newb { background: #ffedd5; color: #9a3412; }
+  .badge.prefilt { background: #f1f5f9; color: #475569; }
   #empty { padding: 40px; text-align: center; color: #a8a29e; }
   #bar .btn.go { background: #2563eb; color: #fff; border-color: #2563eb; }
   #bar .btn.up { background: #6d28d9; color: #fff; border-color: #6d28d9; }
@@ -136,6 +137,7 @@
   <button class="tab active" data-s="new">Нераспределённые <span>0</span></button>
   <button class="tab" data-s="stock_candidate">Сток <span>0</span></button>
   <button class="tab" data-s="non_stock">Не-Сток <span>0</span></button>
+  <button class="tab" data-s="prefiltered">Предотсев <span>0</span></button>
   <button class="tab" data-s="approved">Одобрено <span>0</span></button>
   <button class="tab" data-s="uploaded">Выгружено <span>0</span></button>
   <button class="tab" data-s="rejected">Брак <span>0</span></button>
@@ -248,6 +250,8 @@ let upStatus = null;     // последний ответ /api/upload/status (д
 let upCsvDownloaded = false; // авто-скачивание CSV делаем один раз за выгрузку
 let clsPoll = null;      // id интервала опроса статуса разбора
 let clsStatus = null;    // последний ответ /api/classify/status (для прогресса)
+let pfPoll = null;       // id интервала опроса статуса предотбора
+let pfStatus = null;     // последний ответ /api/prefilter/status (для прогресса)
 
 function fmtDate(iso) {
   const d = new Date(iso);
@@ -256,6 +260,7 @@ function fmtDate(iso) {
 }
 function badgeFor(s) {
   return { new:['newb','НОВОЕ'], stock_candidate:['ok','СТОК'], non_stock:['no','НЕ-СТОК'],
+           prefiltered:['prefilt','ПРЕДОТСЕВ'],
            approved:['approved','ОДОБРЕНО'], described:['described','ОПИСАНО'],
            uploaded:['uploaded','ВЫГРУЖЕНО'], rejected:['rejected','БРАК'] }[s];
 }
@@ -283,12 +288,21 @@ async function loadPile(s) {
   renderGrid();
   refreshCounts();
 }
+// Короткое «почему отсеян»: причина жёсткого отсева либо оценка эстетики.
+function prefilterWhy(a) {
+  const p = a.prefilter;
+  if (!p) return '';
+  if (p.reason) return p.reason;
+  if (p.aesthetic != null) return 'эстетика ' + p.aesthetic.toFixed(1) + ' — ниже порога';
+  return '';
+}
 function cardCaption(a) {
   // В «Одобрено»/«Выгружено» показываем статус: фиолетовый «ВЫГРУЖЕНО»,
   // зелёный «ОПИСАНО» + начало описания, либо красный «БЕЗ МЕТА».
   if (a.status === 'uploaded') return `<span class="badge uploaded">ВЫГРУЖЕНО</span> ${a.file_deleted ? '<span class="badge nometa">УДАЛЁН</span> ' : ''}${esc(a.meta ? a.meta.description : '')}`;
   if (a.meta) return `<span class="badge described">ОПИСАНО</span> ${esc(a.meta.description)}`;
   if (a.status === 'approved') return `<span class="badge nometa">БЕЗ МЕТА</span>`;
+  if (a.status === 'prefiltered') return `<span class="badge prefilt">ПРЕДОТСЕВ</span> ${esc(prefilterWhy(a))}`;
   const [cls, txt] = badgeFor(a.status);
   return `<span class="badge ${cls}">${txt}</span> ${esc(a.category || '')}`;
 }
@@ -344,9 +358,15 @@ function renderInfoPanel(a) {
       `<div>комментарий пользователя от ${fmtDate(c.at)}: ${c.text}</div>`).join('') + '</div>';
   }
   const flags = a.flags && a.flags.length ? `<div class="flags">⚠ ${a.flags.join(', ')}</div>` : '';
+  // Для «Предотсева» вердикта ИИ нет — показываем причину локального фильтра.
+  const reasonText = a.status === 'prefiltered' ? prefilterWhy(a) : (a.reason || '');
   $('#lbInfo').innerHTML =
     `<span class="badge ${cls}">${txt}</span><span class="cat">${esc(a.category || '')}</span>`
-    + flags + `<div class="reason">${esc(a.reason || '')}</div>` + metaBlock(a) + log;
+    + flags + `<div class="reason">${esc(reasonText)}</div>` + metaBlock(a) + log;
+  // В «Предотсеве» «одобрить» = вернуть снимок в разбор (он не видел платного ИИ).
+  const pf = a.status === 'prefiltered';
+  $('#btnApprove').textContent = pf ? '↩ В разбор' : '✓ В сток';
+  $('#btnReject').textContent = pf ? '✕ В брак' : '✕ Из стока';
 }
 // заполнить дорожку кадрами вокруг текущего idx (коллекция закольцована)
 function fillTrack() {
@@ -679,6 +699,7 @@ function renderBanner() {
   const bar = $('#bar');
   if (pile === 'new') { renderNewBanner(bar); return; }
   if (pile === 'non_stock') { renderNonStockBanner(bar); return; }
+  if (pile === 'prefiltered') { renderPrefilteredBanner(bar); return; }
   if (pile !== 'approved') { bar.style.display = 'none'; return; }
   const total = summary.approved || 0, pending = summary.meta_pending || 0, ready = total - pending;
   bar.style.display = 'block';
@@ -708,6 +729,17 @@ function renderBanner() {
 }
 function renderNewBanner(bar) {
   bar.style.display = 'block';
+  if (pfStatus && pfStatus.running) {            // идёт локальный предотбор
+    bar.className = 'run';
+    if (pfStatus.phase === 'intake') { bar.textContent = 'Ищу новые файлы в inbox…'; return; }
+    const seen = pfStatus.done, t = pfStatus.total;
+    const pct = t ? Math.round(seen / t * 100) : 0;
+    bar.innerHTML = `Предотбор (локально, GPU): ${t ? (seen ? seen + '/' + t : 'загружаю модель…') : 'подготовка…'}`
+      + (pfStatus.filtered ? ` · отсеяно ${pfStatus.filtered}` : '')
+      + (pfStatus.errors ? ` · ошибок ${pfStatus.errors}` : '')
+      + `<span class="barbar"><span style="width:${pct}%"></span></span>`;
+    return;
+  }
   if (clsStatus && clsStatus.running) {          // идёт разбор — показываем всегда
     bar.className = 'run';
     if (clsStatus.phase === 'intake') { bar.textContent = 'Ищу новые файлы в inbox…'; return; }
@@ -723,11 +755,57 @@ function renderNewBanner(bar) {
   bar.className = 'neutral';
   bar.innerHTML = (n ? `Новых снимков: ${n}. ` : `Новых снимков нет. `)
     + `<button class="btn" id="barRefresh">🔄 Проверить inbox</button>`
+    + `<button class="btn" id="barPrefilter">🧠 Предотбор (бесплатно)</button>`
     + `<button class="btn go" id="barFast">⚡ Распределить быстро${n ? ' (' + n + ')' : ''}</button>`
     + `<button class="btn" id="barCheap">💸 Дешевле (пакетом)</button>`;
   $('#barRefresh').onclick = refreshInbox;
+  $('#barPrefilter').onclick = startPrefilter;
   $('#barFast').onclick = () => startClassify('fast');
   $('#barCheap').onclick = () => startClassify('batch');
+}
+async function startPrefilter() {
+  const r = await fetch('/api/prefilter/run', { method: 'POST' });
+  if (!r.ok && r.status !== 409) { alert('Не удалось запустить предотбор.'); return; }
+  pfStatus = { running: true, phase: 'intake', total: 0, done: 0, kept: 0, filtered: 0, errors: 0 };
+  if (pile === 'new') renderBanner();    // мгновенно показать, что пошло
+  pollPrefilter();
+}
+function pollPrefilter() {
+  if (pfPoll) return;
+  const tick = async () => {
+    const st = await api('/api/prefilter/status');
+    pfStatus = st;
+    if (st.running) { if (pile === 'new') renderBanner(); return; }
+    clearInterval(pfPoll); pfPoll = null;
+    if (st.error) alert('Ошибка предотбора: ' + st.error);
+    await refreshCounts();
+    if (pile === 'new') loadPile('new');     // отсеянные ушли из «Нераспределённых»
+  };
+  pfPoll = setInterval(tick, 1500);
+  tick();
+}
+// --- куча «Предотсев»: банер с безвозвратным удалением всей кучи ---
+function renderPrefilteredBanner(bar) {
+  const n = summary.prefiltered || 0;
+  if (n === 0) { bar.style.display = 'none'; return; }
+  bar.style.display = 'block';
+  bar.className = 'neutral';
+  bar.innerHTML = `Локальный фильтр отсеял ${n} фото как не-сток (файлы на месте). `
+    + `Откройте кадр и «↩ В разбор», чтобы вернуть нужное, либо удалите остальное. `
+    + `<button class="btn danger" id="barDelPrefilt">🗑 Удалить все (${n})</button>`;
+  $('#barDelPrefilt').onclick = deleteAllPrefiltered;
+}
+async function deleteAllPrefiltered() {
+  const n = summary.prefiltered || 0;
+  if (!n) return;
+  const ok = await confirmAction(
+    'Удалить весь «Предотсев»?',
+    `${n} отсеянных фото будут БЕЗВОЗВРАТНО удалены с диска вместе с превью и записями. Отменить нельзя. Нужные кадры сначала верните в разбор («↩ В разбор»).`,
+    'Удалить навсегда', '#dc2626');
+  if (!ok) return;
+  await fetch('/api/piles/prefiltered/delete_all', { method: 'POST' });
+  await refreshCounts();
+  if (pile === 'prefiltered') loadPile('prefiltered');
 }
 async function refreshInbox() {
   const btn = $('#barRefresh');
@@ -889,12 +967,17 @@ api('/api/classify/status').then(st => {
   if (st.running) pollClassify();
   else if (pile === 'new') renderBanner();
 });
+api('/api/prefilter/status').then(st => {
+  pfStatus = st;
+  if (st.running) pollPrefilter();
+  else if (pile === 'new') renderBanner();
+});
 
 // Сервер каждую минуту принимает новые файлы из inbox — периодически обновляем
 // счётчики, а если открыта группа «Нераспределённые» и их число изменилось —
 // подтягиваем свежие карточки. Не мешаем активным процессам и лайтбоксу.
 setInterval(async () => {
-  if (clsPoll || upPoll || metaPoll) return;
+  if (clsPoll || upPoll || metaPoll || pfPoll) return;
   if ($('#lb').classList.contains('open')) return;
   const prevNew = summary.new || 0;
   await refreshCounts();

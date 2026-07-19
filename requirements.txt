@@ -7,3 +7,16 @@ Pillow>=10.0,<12.0
 anthropic>=0.69,<1.0
 # Шаг 5 (веб-интерфейс ревью): локальный сервер.
 Flask>=3.0,<4.0
+# Локальный предотбор (GPU, без API): CLIP-эмбеддинг + оценка эстетики LAION.
+# ВНИМАНИЕ по установке под видеокарту (напр. GTX 1050 Ti, Pascal):
+#   1) pip install open_clip_torch numpy
+#   2) pip install torch==2.5.1 torchvision==0.20.1 \
+#          --index-url https://download.pytorch.org/whl/cu121
+# CUDA-сборку torch ставь ПОСЛЕДНЕЙ: обычный `pip install open_clip_torch`
+# тянет с PyPI CPU-сборку torch и затирает CUDA (torch станет ...+cpu, GPU
+# отключится). Проверка: python -c "import torch; print(torch.cuda.is_available())"
+open_clip_torch>=2.24
+numpy>=1.26
+# torch/torchvision — только из cu121-индекса (см. выше); в PyPI лежит CPU-сборка.
+torch==2.5.1
+torchvision==0.20.1

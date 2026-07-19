@@ -69,6 +69,26 @@ def cmd_classify(cfg: Config) -> int:
     return 0
 
 
+def cmd_prefilter(cfg: Config, threshold: float | None, rethreshold: bool) -> int:
+    cfg.ensure_dirs()
+    init_db(cfg.db_path)
+    # Тяжёлые зависимости (torch/open_clip) грузим только здесь.
+    from .prefilter import rethreshold as run_rethreshold, run_prefilter
+
+    if rethreshold:
+        run_rethreshold(cfg, threshold)
+        return 0
+    try:
+        run_prefilter(cfg, threshold)
+    except ImportError as exc:
+        log.error(
+            "Не найдены зависимости предотбора (%s). Установи torch/open_clip — "
+            "см. requirements.txt.", exc,
+        )
+        return 1
+    return 0
+
+
 def cmd_improve_prompt(cfg: Config) -> int:
     cfg.ensure_dirs()
     init_db(cfg.db_path)
@@ -164,6 +184,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("config", help="Показать текущую конфигурацию.")
     sub.add_parser("intake", help="Принять новые файлы из папки-входящих.")
     sub.add_parser("classify", help="Классифицировать новые снимки (сток/не-сток).")
+    prefilter = sub.add_parser(
+        "prefilter",
+        help="Локальный предотбор архива (GPU, без API): отсеять явный не-сток.",
+    )
+    prefilter.add_argument(
+        "--threshold", type=float, default=None,
+        help="Порог эстетики 1–10 (по умолчанию из конфигурации).",
+    )
+    prefilter.add_argument(
+        "--rethreshold", action="store_true",
+        help="Только пересобрать кучи под порог (без прогона сети).",
+    )
     sub.add_parser("improve-prompt", help="Доработать промпт по накопленным правкам.")
     sub.add_parser("metadata", help="Сгенерировать метаданные для одобренных снимков.")
     upload = sub.add_parser(
@@ -198,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_intake(cfg)
     if command == "classify":
         return cmd_classify(cfg)
+    if command == "prefilter":
+        return cmd_prefilter(cfg, args.threshold, args.rethreshold)
     if command == "improve-prompt":
         return cmd_improve_prompt(cfg)
     if command == "metadata":

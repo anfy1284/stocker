@@ -296,9 +296,19 @@ def run_classification(
                 "Не удалось доработать промпт по правкам; продолжаю на текущей версии"
             )
         system_prompt = get_active_prompt(conn)  # активная версия из БД
-        rows = conn.execute(
-            "SELECT id, preview_path FROM assets WHERE status = ?", (STATUS_NEW,)
-        ).fetchall()
+        # При включённом предотборе платный разбор берёт только снимки, прошедшие
+        # локальный фильтр (``prefiltered_at`` проставлен) — чтобы авто-разбор не
+        # тратил API на неотфильтрованный архив. Иначе — все «новые», как раньше.
+        if cfg.prefilter_required:
+            rows = conn.execute(
+                "SELECT id, preview_path FROM assets "
+                "WHERE status = ? AND prefiltered_at IS NOT NULL",
+                (STATUS_NEW,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, preview_path FROM assets WHERE status = ?", (STATUS_NEW,)
+            ).fetchall()
         stats["total"] = len(rows)
         report()
         if not rows:

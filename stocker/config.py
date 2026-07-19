@@ -30,21 +30,32 @@ class Config:
     inbox_dir: Path
     stock_dir: Path
     non_stock_dir: Path
+    prefiltered_dir: Path
     approved_dir: Path
     rejected_dir: Path
     done_dir: Path
     previews_dir: Path
+    models_dir: Path
     logs_dir: Path
     export_dir: Path
     db_path: Path
     anthropic_api_key: str | None
     shutterstock_user: str | None
     shutterstock_password: str | None
+    prefilter_threshold: float
+    prefilter_required: bool
     log_level: str
 
     @property
     def has_api_key(self) -> bool:
         return bool(self.anthropic_api_key)
+
+    @property
+    def thumbs_dir(self) -> Path:
+        """Диск-кеш миниатюр сетки (рядом с ``previews``). Имя миниатюры
+        совпадает с именем превью — оба содержат текущий хеш кадра, поэтому
+        после правки фото имя меняется и кеши (диск + браузер) берут свежее."""
+        return self.previews_dir.parent / "thumbs"
 
     @property
     def has_ftps_creds(self) -> bool:
@@ -58,10 +69,12 @@ class Config:
             self.inbox_dir,
             self.stock_dir,
             self.non_stock_dir,
+            self.prefiltered_dir,
             self.approved_dir,
             self.rejected_dir,
             self.done_dir,
             self.previews_dir,
+            self.models_dir,
             self.logs_dir,
             self.export_dir,
             self.db_path.parent,
@@ -76,13 +89,17 @@ class Config:
             "inbox_dir": str(self.inbox_dir),
             "stock_dir": str(self.stock_dir),
             "non_stock_dir": str(self.non_stock_dir),
+            "prefiltered_dir": str(self.prefiltered_dir),
             "approved_dir": str(self.approved_dir),
             "rejected_dir": str(self.rejected_dir),
             "done_dir": str(self.done_dir),
             "previews_dir": str(self.previews_dir),
+            "models_dir": str(self.models_dir),
             "logs_dir": str(self.logs_dir),
             "export_dir": str(self.export_dir),
             "db_path": str(self.db_path),
+            "prefilter_threshold": f"{self.prefilter_threshold:.2f}",
+            "prefilter_required": "да" if self.prefilter_required else "нет",
             "log_level": self.log_level,
             "anthropic_api_key": "<задан>" if self.has_api_key else "<не задан>",
             "shutterstock": "<задан>" if self.has_ftps_creds else "<не задан>",
@@ -106,15 +123,30 @@ def load_config() -> Config:
         inbox_dir=_path_from_env("STOCKER_INBOX_DIR", data_dir / "inbox"),
         stock_dir=_path_from_env("STOCKER_STOCK_DIR", data_dir / "stock"),
         non_stock_dir=_path_from_env("STOCKER_NON_STOCK_DIR", data_dir / "non_stock"),
+        prefiltered_dir=_path_from_env(
+            "STOCKER_PREFILTERED_DIR", data_dir / "prefiltered"
+        ),
         approved_dir=_path_from_env("STOCKER_APPROVED_DIR", data_dir / "approved"),
         rejected_dir=_path_from_env("STOCKER_REJECTED_DIR", data_dir / "rejected"),
         done_dir=_path_from_env("STOCKER_DONE_DIR", data_dir / "done"),
         previews_dir=_path_from_env("STOCKER_PREVIEWS_DIR", data_dir / "previews"),
+        models_dir=_path_from_env("STOCKER_MODELS_DIR", data_dir / "models"),
         logs_dir=_path_from_env("STOCKER_LOGS_DIR", data_dir / "logs"),
         export_dir=_path_from_env("STOCKER_EXPORT_DIR", data_dir / "export"),
         db_path=_path_from_env("STOCKER_DB_PATH", data_dir / "stocker.db"),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
         shutterstock_user=os.environ.get("STOCKER_SHUTTERSTOCK_USER"),
         shutterstock_password=os.environ.get("STOCKER_SHUTTERSTOCK_PASSWORD"),
+        # Порог эстетики (1–10): ниже — в предотсев. Дефолт агрессивный.
+        prefilter_threshold=float(
+            os.environ.get("STOCKER_PREFILTER_THRESHOLD", "5.5")
+        ),
+        # Когда включён, классификатор (платный API) берёт только снимки,
+        # прошедшие локальный предотбор — чтобы авто-разбор не тратил API на
+        # неотфильтрованный архив. Включай на машине с большим массивом фото.
+        prefilter_required=os.environ.get("STOCKER_PREFILTER_REQUIRED", "")
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
         log_level=os.environ.get("STOCKER_LOG_LEVEL", "INFO").upper(),
     )

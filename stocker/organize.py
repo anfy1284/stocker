@@ -9,6 +9,7 @@
   * ``new``                        → ``inbox_dir``     («Нераспределённые», приём из inbox)
   * ``stock_candidate``            → ``stock_dir``     («Сток» — отбирать/фотошопить)
   * ``non_stock``                  → ``non_stock_dir`` («Не-Сток»)
+  * ``prefiltered``                → ``prefiltered_dir`` («Предотсев» — локальный нейрофильтр)
   * ``approved`` / ``described``   → ``approved_dir``  («Одобрено» — фотошопить перед выгрузкой)
   * ``rejected``                   → ``rejected_dir``  («Брак» — можно удалять)
   * ``uploaded``                   → ``done_dir``      («Выгружено» — отработанные, можно удалять)
@@ -37,6 +38,7 @@ from .db import (
     STATUS_DESCRIBED,
     STATUS_NEW,
     STATUS_NON_STOCK,
+    STATUS_PREFILTERED,
     STATUS_REJECTED,
     STATUS_STOCK_CANDIDATE,
     STATUS_UPLOADED,
@@ -55,6 +57,7 @@ _STATUS_DIR: dict[str, str] = {
     STATUS_NEW: "inbox_dir",
     STATUS_STOCK_CANDIDATE: "stock_dir",
     STATUS_NON_STOCK: "non_stock_dir",
+    STATUS_PREFILTERED: "prefiltered_dir",
     STATUS_APPROVED: "approved_dir",
     STATUS_DESCRIBED: "approved_dir",
     STATUS_REJECTED: "rejected_dir",
@@ -176,7 +179,9 @@ def write_manifest(cfg: Config) -> Path:
     path = cfg.data_dir / MANIFEST_NAME
     conn = get_connection(cfg.db_path)
     try:
-        hashes = [r[0] for r in conn.execute("SELECT content_hash FROM assets")]
+        # Вся история хешей, а не только текущие: так вернувшийся оригинал
+        # (версия до правки на месте) тоже опознаётся как уже принятый.
+        hashes = [r[0] for r in conn.execute("SELECT content_hash FROM asset_hashes")]
     finally:
         conn.close()
     path.write_text("\n".join(hashes) + ("\n" if hashes else ""), encoding="ascii")
